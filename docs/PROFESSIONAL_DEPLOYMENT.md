@@ -34,7 +34,7 @@ https://api.example.com       API 与运行时域名入口
 
 ### 一键部署（推荐）
 
-一键入口支持 3x-ui 风格的一行命令：
+一键入口支持远程一行命令：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/wstimin/JTWZ/main/deploy/one-click/install.sh)

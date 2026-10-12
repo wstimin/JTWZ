@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# JTWZ 一键部署入口：既支持 Release 压缩包，也支持 3x-ui 风格的远程一行命令。
+# JTWZ 一键部署入口：既支持 Release 压缩包，也支持远程一行命令。
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_INSTALLER="$SCRIPT_DIR/installer/install.sh"
 

@@ -6,35 +6,9 @@ JTWZ 是一个面向生产环境的综合平台，用于管理多域名跳转、
 
 仓库只保存源码、部署脚本和必要教程。`dist/`、`dist-server/`、数据库、临时截图以及 ZIP/TAR 生成物不会提交到仓库。正式安装包由 GitHub Actions 在发布标签后生成，并作为 Release 资产提供下载。
 
-## 1. 快速开始
+## 1. 服务器部署教程
 
-```bash
-npm install
-cp .env.example .env
-npm run dev
-```
-
-开发地址：
-
-```text
-公开站：http://127.0.0.1:4173/
-管理端：http://127.0.0.1:4174/admin
-API：   http://127.0.0.1:8787/
-```
-
-生产构建和启动：
-
-```bash
-npm run check
-npm run build
-npm start
-```
-
-生产环境必须在 `.env` 中设置 `ADMIN_PASSWORD` 和 `APP_SECRET`。不要把 `.env` 或真实密钥提交到 Git。
-
-## 2. 服务器部署教程
-
-### 方案 A：一键部署（推荐，3x-ui 风格）
+### 方案 A：一键部署（推荐）
 
 一键脚本是首选入口，支持下载发行包后执行，也支持服务器直接运行一行命令：
 
@@ -79,6 +53,32 @@ sudo jt
 4. 在 1Panel 或反向代理中绑定公开域名和管理域名，再登录后台完成系统设置。
 
 SSL 操作要求域名已经解析到当前服务器，并由 certbot/Nginx 完成验证。
+
+## 2. 本地开发
+
+```bash
+npm install
+cp .env.example .env
+npm run dev
+```
+
+本地开发地址：
+
+```text
+公开站：http://127.0.0.1:4173/
+管理端：http://127.0.0.1:4174/admin
+API：   http://127.0.0.1:8787/
+```
+
+生产构建和启动：
+
+```bash
+npm run check
+npm run build
+npm start
+```
+
+生产环境必须在 `.env` 中设置 `ADMIN_PASSWORD` 和 `APP_SECRET`。不要把 `.env` 或真实密钥提交到 Git。
 
 ## 3. 发布与安装包
 
