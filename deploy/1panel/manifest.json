@@ -1,0 +1,9 @@
+{
+  "id": "jtwz",
+  "name": "JTWZ 综合域名管理平台",
+  "version": "1.0.0",
+  "type": "1panel-app",
+  "compose": "docker-compose.yml",
+  "entrypoint": "install.sh",
+  "description": "解压后运行 install.sh，写入域名与管理员配置并启动容器。"
+}

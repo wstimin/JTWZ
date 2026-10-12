@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+APP_DIR="${JTWZ_APP_DIR:-/opt/jtwz}"
+ENV_FILE="$APP_DIR/.env"
+SERVICE_NAME="jtwz"
+API_URL="${JTWZ_API_URL:-http://127.0.0.1:8787}"
+COOKIE_FILE="${TMPDIR:-/tmp}/jtwzctl-$$.cookie"
+trap 'rm -f "$COOKIE_FILE"' EXIT
+
+say() { printf '\n[JTWZ] %s\n' "$*"; }
+die() { printf '[JTWZ][错误] %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null || die "缺少命令：$1"; }
+need curl
+
+env_value() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tail -n 1; }
+restart_service() { if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then systemctl restart "$SERVICE_NAME"; elif command -v docker >/dev/null && [[ -f "$APP_DIR/docker-compose.yml" ]]; then (cd "$APP_DIR" && docker compose restart); fi; }
+
+api_login() {
+  [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
+  local username password
+  username="$(env_value ADMIN_USERNAME)"; password="$(env_value ADMIN_PASSWORD)"
+  if [[ -z "$username" || -z "$password" ]]; then
+    read -r -p '管理员账号: ' username
+    read -r -s -p '管理员密码: ' password; printf '\n' >&2
+  fi
+  api_login_with "$username" "$password"
+}
+
+api_login_with() {
+  local username="$1" password="$2" response
+  response="$(curl -fsS -c "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$username" "$password" <<'PY'
+import json, sys
+print(json.dumps({'username': sys.argv[1], 'password': sys.argv[2]}))
+PY
+)" "$API_URL/api/auth/login")" || die 'API 登录失败，请确认服务和管理员凭据。'
+  printf '%s' "$response" | grep -q '"username"' || die 'API 登录未通过。'
+}
+
+pretty_json() { if command -v python3 >/dev/null; then python3 -m json.tool; else cat; fi; }
+
+domain_list() { api_login; curl -fsS -b "$COOKIE_FILE" "$API_URL/api/domains" | pretty_json; }
+
+domain_add() {
+  api_login
+  local hostname mode target code
+  read -r -p '来源域名: ' hostname
+  read -r -p '模式（redirect/site/download/maintenance）[redirect]: ' mode; mode="${mode:-redirect}"
+  read -r -p '目标地址或内容（可留空）: ' target
+  read -r -p '跳转码（301/302）[302]: ' code; code="${code:-302}"
+  curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$hostname" "$mode" "$target" "$code" <<'PY'
+import json, sys
+print(json.dumps({'hostname': sys.argv[1], 'mode': sys.argv[2], 'target': sys.argv[3], 'redirectCode': int(sys.argv[4]), 'preservePath': True, 'preserveQuery': True, 'forceHttps': True}))
+PY
+)" "$API_URL/api/domains" | pretty_json
+}
+
+domain_update() {
+  api_login
+  local id mode target status code
+  read -r -p '域名 ID: ' id
+  read -r -p '模式（留空保持不变）: ' mode
+  read -r -p '目标地址或内容（留空保持不变）: ' target
+  read -r -p '状态（active/pending/paused/error，留空保持不变）: ' status
+  read -r -p '跳转码（301/302，留空保持不变）: ' code
+  curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$mode" "$target" "$status" "$code" <<'PY'
+import json, sys
+body = {}
+if sys.argv[1]: body['mode'] = sys.argv[1]
+if sys.argv[2]: body['target'] = sys.argv[2]
+if sys.argv[3]: body['status'] = sys.argv[3]
+if sys.argv[4]: body['redirectCode'] = int(sys.argv[4])
+print(json.dumps(body))
+PY
+)" -X PUT "$API_URL/api/domains/$id" | pretty_json
+}
+
+domain_delete() {
+  api_login
+  local id confirm
+  read -r -p '域名 ID: ' id
+  read -r -p "确认删除域名 $id？输入 DELETE: " confirm
+  [[ "$confirm" == DELETE ]] || die '已取消。'
+  curl -fsS -b "$COOKIE_FILE" -X DELETE "$API_URL/api/domains/$id" | pretty_json
+}
+
+ssl_list() {
+  if command -v certbot >/dev/null; then certbot certificates || true; else say '未安装 certbot。'; fi
+  if [[ -d /etc/letsencrypt/live ]]; then find /etc/letsencrypt/live -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort; fi
+}
+
+ssl_add() {
+  need certbot
+  local domain email
+  read -r -p '要签发证书的域名: ' domain
+  read -r -p '证书通知邮箱: ' email
+  certbot --nginx --non-interactive --agree-tos --email "$email" --keep-until-expiring -d "$domain"
+  command -v nginx >/dev/null && nginx -t && systemctl reload nginx || true
+}
+
+ssl_delete() {
+  need certbot
+  local domain confirm
+  read -r -p '要删除证书的域名: ' domain
+  read -r -p "确认删除证书 $domain？输入 DELETE: " confirm
+  [[ "$confirm" == DELETE ]] || die '已取消。'
+  certbot delete --cert-name "$domain"
+  command -v nginx >/dev/null && nginx -t && systemctl reload nginx || true
+}
+
+ssl_update() {
+  need certbot
+  local old_domain new_domain email
+  read -r -p '当前证书域名: ' old_domain
+  read -r -p '新的证书域名: ' new_domain
+  read -r -p '证书通知邮箱: ' email
+  certbot delete --cert-name "$old_domain" || true
+  certbot --nginx --non-interactive --agree-tos --email "$email" --keep-until-expiring -d "$new_domain"
+  command -v nginx >/dev/null && nginx -t && systemctl reload nginx || true
+}
+
+config_show() {
+  [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
+  sed -E 's/^(ADMIN_PASSWORD|APP_SECRET|S3_SECRET_KEY|CLOUDFLARE_API_TOKEN)=.*/\1=******/' "$ENV_FILE"
+}
+
+config_set() {
+  [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
+  local key value
+  read -r -p '配置键（例如 PUBLIC_DOMAIN、ADMIN_APP_ORIGIN、STORAGE_PROVIDER）: ' key
+  case "$key" in
+    PUBLIC_APP_ORIGIN|ADMIN_APP_ORIGIN|APP_ORIGIN|SUPPORT_EMAIL|STORAGE_PROVIDER|S3_ENDPOINT|S3_BUCKET|S3_PUBLIC_BASE_URL|UPDATE_MANIFEST_URL) ;;
+    *) die '该配置键不允许通过 CLI 修改。' ;;
+  esac
+  read -r -p '新值: ' value
+  python3 - "$ENV_FILE" "$key" "$value" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1]); key = sys.argv[2]; value = sys.argv[3]
+lines = p.read_text().splitlines()
+out = []; found = False
+for line in lines:
+    if line.startswith(key + '='):
+        out.append(key + '=' + value); found = True
+    else: out.append(line)
+if not found: out.append(key + '=' + value)
+p.write_text('\n'.join(out) + '\n')
+PY
+  restart_service
+  say '配置已保存并重启服务。'
+}
+
+backup_create() { api_login; curl -fsS -b "$COOKIE_FILE" -X POST "$API_URL/api/admin/backups/create" | pretty_json; }
+backup_list() { api_login; curl -fsS -b "$COOKIE_FILE" "$API_URL/api/admin/backups" | pretty_json; }
+
+account_update() {
+  [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
+  local current_username current_password new_username new_password value
+  current_username="$(env_value ADMIN_USERNAME)"
+  current_password="$(env_value ADMIN_PASSWORD)"
+  if [[ -z "$current_username" || -z "$current_password" ]]; then
+    read -r -p '当前管理员账号: ' current_username
+    read -r -s -p '当前管理员密码: ' current_password; printf '\n' >&2
+  fi
+  read -r -p "新管理员账号 [$current_username]: " new_username; new_username="${new_username:-$current_username}"
+  read -r -s -p '新管理员密码（至少 10 位，包含字母和数字）: ' new_password; printf '\n' >&2
+  api_login_with "$current_username" "$current_password"
+  curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/json' -X PUT -d "$(python3 - "$current_password" "$new_password" "$new_username" <<'PY'
+import json, sys
+print(json.dumps({'currentPassword': sys.argv[1], 'newPassword': sys.argv[2], 'newUsername': sys.argv[3]}))
+PY
+)" "$API_URL/api/admin/account" | pretty_json
+  python3 - "$ENV_FILE" "$new_username" "$new_password" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1]); replacements = {'ADMIN_USERNAME': sys.argv[2], 'ADMIN_PASSWORD': sys.argv[3]}
+lines = p.read_text().splitlines(); out=[]; seen=set()
+for line in lines:
+    key = line.split('=', 1)[0] if '=' in line else ''
+    if key in replacements: out.append(key + '=' + replacements[key]); seen.add(key)
+    else: out.append(line)
+for key, value in replacements.items():
+    if key not in seen: out.append(key + '=' + value)
+p.write_text('\n'.join(out) + '\n')
+PY
+  chmod 600 "$ENV_FILE"
+  say '管理员账号和密码已更新。'
+}
+
+uninstall() {
+  local mode="${1:-}" confirm backup_dir
+  if [[ -z "$mode" ]]; then read -r -p '卸载模式（keep=保留数据，purge=清除数据）[keep]: ' mode; mode="${mode:-keep}"; fi
+  [[ "$mode" == keep || "$mode" == purge ]] || die '卸载模式只能是 keep 或 purge。'
+  read -r -p "确认卸载 JTWZ（$mode）？输入 UNINSTALL: " confirm
+  [[ "$confirm" == UNINSTALL ]] || die '已取消。'
+  if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then systemctl disable --now "$SERVICE_NAME" || true; rm -f "/etc/systemd/system/${SERVICE_NAME}.service"; systemctl daemon-reload; fi
+  if command -v docker >/dev/null && [[ -f "$APP_DIR/docker-compose.yml" ]]; then
+    if [[ "$mode" == purge ]]; then (cd "$APP_DIR" && docker compose down -v || true); else (cd "$APP_DIR" && docker compose down || true); fi
+  fi
+  if command -v nginx >/dev/null && [[ -f /etc/nginx/conf.d/jtwz.conf ]]; then rm -f /etc/nginx/conf.d/jtwz.conf; nginx -t && systemctl reload nginx || true; fi
+  if [[ "$mode" == keep && -d "$APP_DIR/data" ]]; then
+    backup_dir="/opt/jtwz-data-$(date +%Y%m%d-%H%M%S)"
+    mv "$APP_DIR/data" "$backup_dir"
+    say "数据已保留在：$backup_dir"
+  fi
+  if [[ "$mode" == purge && -d "$APP_DIR/data" ]]; then rm -rf "$APP_DIR/data"; fi
+  rm -rf "$APP_DIR"
+  rm -f /usr/local/bin/jtwzctl
+  say 'JTWZ 程序已卸载。SSL 证书不会被自动删除，如需清理请使用 certbot delete。'
+}
+
+status() {
+  say '系统信息'; uname -a; printf 'Node: '; node --version 2>/dev/null || printf '未安装\n'; printf '磁盘: '; df -h "$APP_DIR" | tail -n 1
+  if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then systemctl --no-pager --full status "$SERVICE_NAME" || true; elif command -v docker >/dev/null && [[ -f "$APP_DIR/docker-compose.yml" ]]; then (cd "$APP_DIR" && docker compose ps); fi
+  curl -fsS "$API_URL/api/health" 2>/dev/null | pretty_json || say 'API 暂不可用。'
+  [[ -f "$ENV_FILE" ]] && say "公开域名：$(env_value PUBLIC_DOMAIN) / 管理域名：$(env_value ADMIN_DOMAIN)"
+}
+
+menu() {
+  while true; do
+    cat <<'EOF'
+
+JTWZ 服务器管理
+1) 查看系统与服务状态   2) 查看域名
+3) 添加域名              4) 修改域名
+5) 删除域名              6) 查看 SSL 证书
+7) 添加 SSL 证书          8) 删除 SSL 证书
+9) 修改 SSL 域名          10) 查看配置
+11) 修改配置              12) 修改管理员账号密码
+13) 创建完整备份          14) 查看备份
+15) 重启服务              16) 卸载并保留数据
+17) 卸载并清除数据
+0) 退出
+EOF
+    local choice; read -r -p '请选择: ' choice
+    case "$choice" in
+      1) status ;; 2) domain_list ;; 3) domain_add ;; 4) domain_update ;; 5) domain_delete ;; 6) ssl_list ;; 7) ssl_add ;; 8) ssl_delete ;; 9) ssl_update ;; 10) config_show ;; 11) config_set ;; 12) account_update ;; 13) backup_create ;; 14) backup_list ;; 15) restart_service; status ;; 16) uninstall keep ;; 17) uninstall purge ;; 0) break ;; *) say '无效选项。' ;;
+    esac
+  done
+}
+
+case "${1:-menu}" in
+  menu) menu ;;
+  status|info) status ;;
+  domain) case "${2:-list}" in list) domain_list ;; add) domain_add ;; update|edit) domain_update ;; delete|remove) domain_delete ;; *) die '用法：jtwzctl domain {list|add|update|delete}' ;; esac ;;
+  ssl) case "${2:-list}" in list) ssl_list ;; add) ssl_add ;; update|edit) ssl_update ;; delete|remove) ssl_delete ;; renew) need certbot; certbot renew; command -v nginx >/dev/null && systemctl reload nginx || true ;; *) die '用法：jtwzctl ssl {list|add|update|delete|renew}' ;; esac ;;
+  config) case "${2:-show}" in show) config_show ;; set|update) config_set ;; *) die '用法：jtwzctl config {show|set}' ;; esac ;;
+  backup) case "${2:-create}" in create) backup_create ;; list) backup_list ;; *) die '用法：jtwzctl backup {create|list}' ;; esac ;;
+  account) account_update ;;
+  uninstall) uninstall ;;
+  restart) restart_service ;;
+  *) die '用法：jtwzctl {menu|status|domain|ssl|config|account|backup|uninstall|restart}' ;;
+esac

@@ -1,0 +1,40 @@
+# 使用 envsubst 或部署系统替换三个域名变量后加载此模板。
+
+server {
+  listen 443 ssl http2;
+  server_name ${PUBLIC_DOMAIN};
+  root /opt/aurelia/dist/public;
+
+  location / {
+    try_files $uri $uri/ /index.html;
+  }
+}
+
+server {
+  listen 443 ssl http2;
+  server_name ${ADMIN_DOMAIN};
+  root /opt/aurelia/dist/admin;
+
+  add_header X-Robots-Tag "noindex, nofollow, noarchive" always;
+  location / {
+    try_files $uri $uri/ /index.html;
+  }
+}
+
+server {
+  listen 443 ssl http2;
+  server_name ${API_DOMAIN};
+  client_max_body_size 2g;
+
+  location / {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_request_buffering off;
+  }
+}
+
+# 已验证的跳转域名和静态网站域名也应使用与 API_DOMAIN 相同的反向代理规则，
+# 但必须保留原始 Host，供平台选择对应的域名规则或网站版本。

@@ -1,0 +1,22 @@
+:80 {
+  encode gzip zstd
+  request_body {
+    max_size 2GB
+  }
+  handle /api/* {
+    reverse_proxy 127.0.0.1:8787
+  }
+  handle /preview/* {
+    reverse_proxy 127.0.0.1:8787
+  }
+  handle /admin* {
+    root * /opt/aurelia/dist
+    try_files {path} /admin/index.html
+    file_server
+  }
+  handle {
+    root * /opt/aurelia/dist/public
+    try_files {path} /index.html
+    file_server
+  }
+}

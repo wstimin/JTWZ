@@ -1,0 +1,40 @@
+{
+  "name": "aurelia-platform",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n PUBLIC,ADMIN,API -c yellow,blue,green \"npm:dev:public\" \"npm:dev:admin\" \"npm:dev:api\"",
+    "dev:web": "npm run dev:public",
+    "dev:public": "vite --config vite.public.config.ts",
+    "dev:admin": "vite --config vite.admin.config.ts",
+    "dev:api": "tsx watch server/index.ts",
+    "build": "tsc -b && npm run build:public && npm run build:admin && tsc -p tsconfig.server.json",
+    "build:public": "vite build --config vite.public.config.ts",
+    "build:admin": "vite build --config vite.admin.config.ts",
+    "preview": "npm run preview:public",
+    "preview:public": "vite preview --config vite.public.config.ts",
+    "preview:admin": "vite preview --config vite.admin.config.ts",
+    "start": "node dist-server/index.js",
+    "test": "node tests/smoke.mjs",
+    "check": "tsc -b --pretty false && tsc -p tsconfig.server.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-router-dom": "latest",
+    "vite": "latest",
+    "yauzl": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@types/yauzl": "^3.4.0",
+    "concurrently": "latest",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}

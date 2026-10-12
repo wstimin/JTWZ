@@ -1,0 +1,24 @@
+node_modules/
+dist/
+.vite/
+.edge-profile/
+.edge-preview*/
+.edge-*/
+*.log
+.env
+.env.*
+!.env.example
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/backups/*
+data/storage/*
+data/site-releases/*
+data/temp/*
+data/updates/*
+data/brand-assets/*
+dist-server/
+
+# Local visual QA screenshots and TypeScript build metadata
+preview-*.png
+*.tsbuildinfo
