@@ -1,38 +1,93 @@
-# 专业版架构与部署
+# JTWZ 专业版部署教程
 
-## 应用边界
+本文只描述生产部署。开发环境请先阅读仓库根目录的 README。
 
-本项目采用单仓库、三应用边界：
+## 1. 部署边界
+
+JTWZ 由三个运行边界组成：
 
 ```text
-公开展示端（dist/public）
-        │
-        ├── HTTPS API
-        │
-管理后台（dist/admin）
-        │
-        ▼
-Node API（dist-server）── SQLite / 对象存储 / DNS / 证书服务
+公开站（dist/public） ─┐
+管理端（dist/admin）  ─┼─ 反向代理 ─ Node API（dist-server） ─ SQLite / 对象存储
+跳转与站点域名       ─┘                         │
+                                             DNS / HTTPS / 备份
 ```
 
-- 公开展示端只包含首页、软件下载中心和软件详情，不打包管理页面或登录状态。
-- 管理后台单独构建，包含登录、管理页面和受保护操作。
-- API 独立运行，负责鉴权、数据、审计、签名上传下载和域名运行时。
-- 公共类型、主题和基础组件继续在仓库内共享，避免两套产品产生视觉和数据模型漂移。
+- 公开站只提供首页、公告、软件下载中心和软件详情，不包含管理入口。
+- 管理端独立构建，所有写操作都需要 HttpOnly 会话和服务端权限校验。
+- API 负责鉴权、域名跳转、站点发布、软件分发、统计、审计和备份。
+- 安装包通过对象存储签名地址直传/直下；大文件不经过普通业务请求中转。
 
-## 推荐域名
+## 2. 推荐域名
 
 ```text
 https://www.example.com       公开展示端
 https://admin.example.com     管理后台
-https://api.example.com       API 与静态网站预览
+https://api.example.com       API 与运行时域名入口
 ```
 
-自定义跳转域名和静态网站域名应由负载均衡或边缘代理转发到 Node API，由 API 按请求 `Host` 执行跳转或提供已发布网站。
+自定义跳转域名和静态网站域名应解析到反向代理，再由 API 按请求 Host 和 Path 执行跳转或提供已发布站点。
 
-## 构建配置
+## 3. 使用发行包安装
 
-独立域名部署前设置：
+正式包从 [GitHub Releases](https://github.com/wstimin/JTWZ/releases) 获取。源码仓库不包含生成的 ZIP/TAR。
+
+### 宝塔
+
+```bash
+unzip jtwz-baota-vX.Y.Z.zip
+cd jtwz-baota-vX.Y.Z
+sudo ./install.sh
+```
+
+安装向导会写入生产 `.env`、构建目录、systemd 服务和 Nginx 配置。完成后将 DNS 指向服务器，再通过管理域名登录。
+
+安装器不会自动识别公网 IP。公开域名和管理域名必须由管理员手动填写为已经解析到服务器的公网域名；`localhost`、私网主机名和 IP 地址会被拒绝。部署文件中的 `127.0.0.1` 仅是 API 与本机反向代理的内部绑定，不是对外访问地址。
+
+### 1Panel
+
+```bash
+tar -xzf jtwz-1panel-vX.Y.Z.tar.gz
+cd jtwz-1panel-vX.Y.Z
+sudo ./install.sh
+```
+
+安装器会生成 Compose 环境并启动容器，应用数据保存在 Docker volume。域名和 HTTPS 可在 1Panel 反向代理中绑定。
+
+### 一键部署
+
+```bash
+tar -xzf jtwz-one-click-vX.Y.Z.tar.gz
+cd jtwz-one-click-vX.Y.Z
+sudo ./install.sh
+sudo jtwzctl menu
+```
+
+`jtwzctl` 支持服务状态、域名增删改查、SSL 增删改与续期、配置修改、管理员账号密码修改、完整迁移备份和两种卸载模式：
+
+- 保留数据：停止服务并把数据移动到 `/opt/jtwz-data-时间戳`；
+- 清除数据：删除应用数据和 Docker 数据卷，证书文件不会被脚本自动删除。
+
+## 4. 源码部署
+
+```bash
+npm ci
+cp .env.example .env
+npm run check
+npm run build
+npm start
+```
+
+生产 `.env` 至少需要：
+
+```dotenv
+NODE_ENV=production
+ADMIN_USERNAME=替换为管理员账号
+ADMIN_PASSWORD=替换为至少 12 位随机密码
+APP_SECRET=替换为至少 32 字节随机密钥
+```
+
+不同域名部署时设置：
 
 ```dotenv
 PUBLIC_APP_ORIGIN=https://www.example.com
@@ -40,37 +95,29 @@ ADMIN_APP_ORIGIN=https://admin.example.com
 VITE_PUBLIC_SITE_URL=https://www.example.com
 VITE_ADMIN_SITE_URL=https://admin.example.com
 VITE_API_BASE_URL=https://api.example.com
-VITE_ADMIN_BASE_PATH=/
 ```
 
-然后运行：
+同域名部署时保留默认 `/admin` 路径，并让反向代理把 `/api` 转发到 `127.0.0.1:8787`。
+
+## 5. 反向代理与 HTTPS
+
+仓库提供 `deploy/nginx.conf`、`deploy/nginx.professional.conf.template` 和 `deploy/Caddyfile`。上线顺序建议为：
+
+1. 先完成 DNS 解析和 HTTP 反向代理；
+2. 确认公开站、管理端和 API 健康检查均返回 200；
+3. 使用 certbot 或面板签发证书；
+4. 将 HTTP 重定向到 HTTPS；
+5. 在管理端系统设置中再次检查公开域名、管理域名和 API 地址。
+
+## 6. 对象存储与备份
+
+开发和小规模部署可以使用本地存储。生产大文件推荐设置 `STORAGE_PROVIDER=s3`，并配置 R2、OSS、COS 或其他 S3 兼容服务。备份包含数据库、静态网站版本、品牌资源和安装包对象；恢复前会校验归档大小和 SHA-256，并创建回滚点。
+
+## 7. 发布新版本
 
 ```bash
-npm run build
+git tag v1.0.1
+git push origin v1.0.1
 ```
 
-输出目录：
-
-```text
-dist/public/     公开站静态文件
-dist/admin/      管理端静态文件
-dist-server/     API 服务
-```
-
-如果部署在同一域名，保留 `VITE_API_BASE_URL`、`VITE_PUBLIC_SITE_URL`、`VITE_ADMIN_SITE_URL` 为空，并使用默认 `VITE_ADMIN_BASE_PATH=/admin/`。此时公开站位于 `/`，管理端位于 `/admin`。
-
-## 安全说明
-
-- API 仅向 `PUBLIC_APP_ORIGIN`、`ADMIN_APP_ORIGIN` 和兼容的 `APP_ORIGIN` 返回凭证型 CORS 响应。
-- 写操作继续执行请求来源校验，未授权来源会返回 `403`。
-- 管理会话使用 HttpOnly Cookie；推荐三个应用使用同一主域名的子域，以保持严格 SameSite 防护。
-- 管理端 HTML 带有 `noindex`、`nofollow` 和 `noarchive`，但这不能替代登录鉴权和服务端权限校验。
-- 安装包依旧由浏览器直传对象存储，下载由对象存储或 API 签名地址完成。
-
-## 开发地址
-
-```text
-http://127.0.0.1:4173          公开展示端
-http://127.0.0.1:4174/admin    管理后台
-http://127.0.0.1:8787          API / 生产组合入口
-```
+GitHub Actions 会构建三种安装包并发布 `SHA256SUMS`。发布前请同步 `package.json`、安装包 manifest 和 `server/backup.ts` 的最低兼容版本。

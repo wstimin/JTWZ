@@ -16,6 +16,15 @@ die() { printf '\n[JTWZ][错误] %s\n' "$*" >&2; exit 1; }
 ask() { local prompt="$1" default="${2:-}" value; if [[ -n "$default" ]]; then read -r -p "$prompt [$default]: " value; printf '%s' "${value:-$default}"; else read -r -p "$prompt: " value; printf '%s' "$value"; fi; }
 ask_secret() { local prompt="$1" value; read -r -s -p "$prompt: " value; printf '\n' >&2; printf '%s' "$value"; }
 
+validate_public_domain() {
+  local value="${1,,}"
+  [[ -n "$value" ]] || die '必须填写公网域名，安装器不会自动探测公网 IP。'
+  [[ "$value" != *://* && "$value" != */* && "$value" != *' '* ]] || die "域名格式无效：$value"
+  [[ "$value" != 'localhost' && "$value" != *.local && "$value" != *.lan && "$value" != *.internal ]] || die "禁止使用内网主机名：$value"
+  [[ "$value" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)+$ ]] || die "必须使用可解析的公网域名（例如 www.example.com）：$value"
+  [[ ! "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die '不接受 IP 地址，请填写已经解析到服务器的公网域名。'
+}
+
 [[ "$(id -u)" == 0 ]] || die '请使用 root 执行安装。'
 command -v curl >/dev/null || die '缺少 curl，请先安装后重试。'
 command -v openssl >/dev/null || die '缺少 openssl，请先安装后重试。'
@@ -39,8 +48,8 @@ install_node() {
 prompt_settings() {
   local existing_domain='' existing_admin='admin'
   [[ -f "$ENV_FILE" ]] && existing_domain="$(grep -E '^PUBLIC_DOMAIN=' "$ENV_FILE" | cut -d= -f2- || true)" && existing_admin="$(grep -E '^ADMIN_USERNAME=' "$ENV_FILE" | cut -d= -f2- || true)"
-  PUBLIC_DOMAIN="$(ask '公开域名（可留空，稍后在面板绑定）' "$existing_domain")"
-  ADMIN_DOMAIN="$(ask '管理域名（可留空，与公开域名共用）' "${ADMIN_DOMAIN:-$PUBLIC_DOMAIN}")"
+  PUBLIC_DOMAIN="$(ask '公开公网域名（必须填写，不自动识别公网 IP）' "$existing_domain")"
+  ADMIN_DOMAIN="$(ask '管理公网域名（可与公开域名相同）' "${ADMIN_DOMAIN:-$PUBLIC_DOMAIN}")"
   ADMIN_USERNAME="$(ask '管理员账号' "$existing_admin")"
   ADMIN_PASSWORD="$(ask_secret '管理员密码（至少 12 位）')"
   [[ "${#ADMIN_PASSWORD}" -ge 12 ]] || die '管理员密码至少需要 12 位。'
@@ -62,6 +71,7 @@ write_env() {
   install -d -m 750 "$APP_DIR/data" "$APP_DIR/data/backups" "$APP_DIR/data/storage" "$APP_DIR/data/site-releases" "$APP_DIR/data/temp" "$APP_DIR/data/brand-assets" "$APP_DIR/data/updates"
   cat > "$ENV_FILE" <<EOF
 NODE_ENV=production
+# 仅供本机反向代理访问；公网入口必须使用上面填写的域名。
 API_HOST=127.0.0.1
 API_PORT=8787
 APP_HOST=127.0.0.1
@@ -155,6 +165,8 @@ install_panel_runtime() {
 main() {
   say "JTWZ 安装向导（$PANEL）"
   if [[ -f "$ENV_FILE" && -s "$ENV_FILE" ]]; then load_existing_env; else prompt_settings; fi
+  validate_public_domain "$PUBLIC_DOMAIN"
+  validate_public_domain "$ADMIN_DOMAIN"
   install_application
   install_panel_runtime
   if [[ -f "$PACKAGE_DIR/jtwzctl" ]]; then install -m 755 "$PACKAGE_DIR/jtwzctl" /usr/local/bin/jtwzctl; fi

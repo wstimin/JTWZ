@@ -1,78 +1,20 @@
-# JTWZ 综合域名管理平台
+# JTWZ
 
-一个面向多域名跳转、静态网站发布和软件分发的综合管理平台。
+JTWZ 是一个面向生产环境的综合平台，用于管理多域名跳转、静态网站发布和软件分发。
 
-品牌名称、Logo、文案和支持邮箱均可在管理后台配置；仓库不附带业务演示数据。
+它将公开展示端、管理后台和 API 分开构建：公开站负责产品介绍、公告和下载；管理端负责域名、跳转规则、站点、软件、版本、安装包、备份和系统设置；API 负责鉴权、数据持久化、对象存储直传、统计和运行时域名处理。
 
-## 当前版本
+仓库只保存源码、部署脚本和必要教程。`dist/`、`dist-server/`、数据库、临时截图以及 ZIP/TAR 生成物不会提交到仓库。正式安装包由 GitHub Actions 在发布标签后生成，并作为 Release 资产提供下载。
 
-当前已完成专业版核心版本，包含独立公开站、独立管理端、生产 API、对象存储直传、域名接入、备份灾备和可观测性能力：
-
-- 专业公开首页（真实产品、版本、公告与公开统计）；
-- 软件下载中心；
-- 软件详情页、版本历史和更新说明；
-- 管理员真实登录、HttpOnly 会话与登录限流；
-- 管理后台框架；
-- 仪表盘；
-- 域名管理、DNS 验证、编辑、启停与删除；
-- 跳转规则创建、编辑、定时、冲突 / 循环校验、启停与删除；
-- 静态网站项目、ZIP 安全发布、版本回滚和自定义 `404.html`；
-- 软件管理；
-- 安装包管理；
-- 数据统计；
-- 品牌与系统设置；
-- 浅色 / 深色主题；
-- 桌面、平板、手机响应式布局；
-- SQLite 数据持久化；
-- 域名新增、启用/暂停和删除接口；
-- 路径级 301 / 302 跳转规则；
-- 按请求 Host 与 Path 执行真实跳转；
-- 查询参数和原始路径保留；
-- 品牌设置接口、访问事件与审计日志；
-- 本地对象存储适配层和流式大文件上传；
-- 浏览器直传上传凭证与 S3 兼容对象存储上传完成校验；
-- Cloudflare DNS 自动写入 TXT 所有权验证记录（未配置时保留手动模式）；
-- DNS 验证后可自动启用 Cloudflare Universal SSL，或在后台手动重试 HTTPS；
-- 安装包分片续传、状态暂停 / 恢复、软件和静态网站状态管理；
-- 异常告警、管理员写操作限流、完整迁移备份导入导出；
-- Nginx / Caddy 反向代理配置与基础冒烟测试脚本；
-- 带格式版本的流式迁移归档，包含数据库、静态网站历史、品牌资源和安装包对象；
-- 恢复前自动回滚备份、文件大小与 SHA-256 校验，以及跨本地 / S3 存储恢复；
-- 自动完整备份、保留策略和设置页即时备份；
-- S3 模式下备份异地复制与签名 Webhook 告警通知；
-- S3 multipart 分片上传、ETag 合并和大文件云端直传；
-- 通用 DNS / HTTPS Webhook 适配，可接入其他 DNS/CDN 或 ACME 网关；
-- 外部证书服务异步回调和状态同步；
-- 软件资料与静态网站资料编辑、发布状态管理；
-- 独立软件版本实体，支持发布通道、推荐版、归档、删除和多平台安装包关联；
-- 公告管理、置顶发布和软件下载中心公告展示；
-- 管理员密码修改和密码变更审计；
-- 安装包 SHA-256 校验与限时签名下载地址；
-- 安装包上传、下载、计数和存储文件删除；
-- 软件产品真实创建接口；
-- 静态网站 ZIP 安全解压与版本发布；
-- 静态网站独立预览、按域名提供文件及版本回滚接口；
-- DNS TXT 所有权验证指引和实时查询；
-- 域名 DNS、HTTPS 签发状态记录；
-- 静态网站版本历史和一键回滚界面；
-- 真实访问、跳转、下载、设备和排行统计；
-- 仪表盘真实趋势与管理员审计活动；
-- 独立操作日志页面，支持审计记录检索与刷新；
-- 审计日志服务端筛选、分页和总量统计；
-- 设置页真实分类切换、系统健康检查、完整备份恢复、版本检测和安全更新暂存；
-- 专业公开首页，展示真实产品、下载数据、平台能力和已发布公告，不含任何管理入口；
-- 浏览器本地数据作为接口离线兜底。
-
-当前开发环境默认使用本地磁盘对象存储；配置 `STORAGE_PROVIDER=s3` 后可通过签名 URL 直传 R2 / OSS / COS / 其他 S3 兼容服务。DNS、HTTPS 和告警能力在未配置外部服务时会安全降级到手动验证或站内状态。
-
-## 本地运行
+## 1. 快速开始
 
 ```bash
 npm install
+cp .env.example .env
 npm run dev
 ```
 
-默认地址：
+开发地址：
 
 ```text
 公开站：http://127.0.0.1:4173/
@@ -80,58 +22,107 @@ npm run dev
 API：   http://127.0.0.1:8787/
 ```
 
-请复制 `.env.example` 为 `.env`，配置管理员账号、随机管理员密码和签名密钥。生产环境不设置 `ADMIN_PASSWORD` 或 `APP_SECRET` 时，服务会拒绝启动。开发环境若未配置密码，仅用于本地冒烟测试的回退凭据不会显示在界面或日志中。
-
-## 构建
+生产构建和启动：
 
 ```bash
+npm run check
 npm run build
-```
-
-公开站输出到 `dist/public/`，管理端输出到 `dist/admin/`，后端输出到 `dist-server/`。生产启动：
-
-```bash
 npm start
 ```
 
-默认生产服务地址：`http://127.0.0.1:8787/`。
+生产环境必须在 `.env` 中设置 `ADMIN_PASSWORD` 和 `APP_SECRET`。不要把 `.env` 或真实密钥提交到 Git。
 
-## 服务器安装包
+## 2. 服务器部署教程
 
-推送 `v*` 标签后，GitHub Actions 会自动生成三种可下载资产：
+### 方案 A：宝塔
 
-- 宝塔 ZIP：解压后执行 `sudo ./install.sh`，直接进入域名、管理员和 Nginx 安装向导；
-- 1Panel TAR.GZ：解压后执行 `sudo ./install.sh`，写入 Compose 环境并启动容器；
-- 一键部署 TAR.GZ：解压后执行 `sudo ./install.sh`，安装完成后使用 `sudo jtwzctl menu`。
+1. 从 [Releases](https://github.com/wstimin/JTWZ/releases) 下载 `jtwz-baota-vX.Y.Z.zip`。
+2. 上传到服务器并解压，进入解压目录。
+3. 执行：
 
-一键管理菜单是真实运维入口，支持服务状态、域名增删改查、SSL 证书签发 / 删除 / 换域名 / 续期、配置修改、完整备份、管理员账号密码修改，以及卸载时选择保留或清除数据。生成包和 SHA-256 清单见 `.github/workflows/release-packages.yml`。
+   ```bash
+   sudo ./install.sh
+   ```
 
-## 主要路由
+4. 按向导填写公开域名、管理域名、管理员账号、管理员密码和支持邮箱。
+5. 将 DNS 解析指向服务器，安装器会生成 Nginx 和 systemd 配置。
+6. 访问管理域名登录后台，在“系统设置”中完成品牌、对象存储、备份和 HTTPS 配置。
+
+安装器不会自动探测公网 IP，也不会把 `localhost`、私网主机名或 IP 地址当作站点域名；生产安装必须手动填写已经解析到服务器的公网域名。`127.0.0.1` 只用于服务器内部 API 与反向代理之间的本机通信。
+
+### 方案 B：1Panel
+
+1. 下载 `jtwz-1panel-vX.Y.Z.tar.gz` 并解压。
+2. 执行：
+
+   ```bash
+   sudo ./install.sh
+   ```
+
+3. 向导会生成 Compose 环境并启动容器；数据保存在 Docker volume 中。
+4. 在 1Panel 或反向代理中绑定公开域名和管理域名，再登录后台完成系统设置。
+
+### 方案 C：一键部署
+
+```bash
+tar -xzf jtwz-one-click-vX.Y.Z.tar.gz
+cd jtwz-one-click-vX.Y.Z
+sudo ./install.sh
+sudo jtwzctl menu
+```
+
+`jtwzctl` 是真实的服务器管理入口，支持：
+
+- 查看系统、Node、磁盘、服务和 API 健康状态；
+- 域名新增、修改、删除和列表查询；
+- SSL 证书签发、删除、换域名和续期；
+- 生产配置查看、修改和服务重启；
+- 管理员用户名和密码修改；
+- 完整迁移备份创建与查询；
+- 卸载并保留数据，或卸载并清除数据。
+
+SSL 操作要求域名已经解析到当前服务器，并由 certbot/Nginx 完成验证。
+
+## 3. 发布与安装包
+
+提交 `v*` 标签后，`.github/workflows/release-packages.yml` 会自动构建：
+
+- `jtwz-baota-vX.Y.Z.zip`
+- `jtwz-1panel-vX.Y.Z.tar.gz`
+- `jtwz-one-click-vX.Y.Z.tar.gz`
+- `SHA256SUMS`
+
+安装包只放在 GitHub Release，不会混入源码分支。发布前请确认版本号已同步到 `package.json`、安装包 manifest 和备份兼容版本。
+
+## 4. 目录说明
+
+```text
+src/                 前端公开站与管理端源码
+server/              Node API、鉴权、备份、存储和运行时逻辑
+apps/                独立前端入口 HTML
+deploy/              宝塔、1Panel、一键部署和反向代理源码
+tests/               冒烟测试
+docs/                生产部署教程
+.github/workflows/   发布安装包的 CI 工作流
+```
+
+## 5. 主要路由
 
 ```text
 /                 公开首页
 /downloads        软件下载中心
-/downloads/:slug  软件详情与版本历史
+/downloads/:slug  软件详情和版本历史
 /admin/login      管理员登录
-/admin            仪表盘
+/admin            管理后台
 /admin/domains    域名管理
 /admin/redirects  跳转规则
 /admin/sites      静态网站
 /admin/software   软件管理
 /admin/versions   版本管理
-/admin/packages   安装包
-/admin/announcements 公告管理
-/admin/analytics  数据统计
-/admin/audit-logs 操作日志
+/admin/packages   安装包管理
 /admin/settings   系统设置
 ```
 
-## 项目规范
+## 6. 生产部署参考
 
-- [完整项目需求](docs/PROJECT_REQUIREMENTS.md)
-- [强制 UI 设计规范](docs/UI_DESIGN_SYSTEM.md)
-- [当前实施状态](docs/IMPLEMENTATION_STATUS.md)
-- [专业版架构与部署](docs/PROFESSIONAL_DEPLOYMENT.md)
-- [总体代码审查与整改记录](docs/CODE_REVIEW_2026-10-12.md)
-- [项目实施约束](AGENTS.md)
-
+完整的域名、反向代理、对象存储、备份、HTTPS 和安全边界说明见 [docs/PROFESSIONAL_DEPLOYMENT.md](docs/PROFESSIONAL_DEPLOYMENT.md)。
