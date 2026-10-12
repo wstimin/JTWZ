@@ -16,13 +16,69 @@ die() { printf '\n[JTWZ][错误] %s\n' "$*" >&2; exit 1; }
 ask() { local prompt="$1" default="${2:-}" value; if [[ -n "$default" ]]; then read -r -p "$prompt [$default]: " value; printf '%s' "${value:-$default}"; else read -r -p "$prompt: " value; printf '%s' "$value"; fi; }
 ask_secret() { local prompt="$1" value; read -r -s -p "$prompt: " value; printf '\n' >&2; printf '%s' "$value"; }
 
-validate_public_domain() {
+is_public_ipv4() {
+  local ip="$1" a b c d
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r a b c d <<< "$ip"
+  (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || return 1
+  (( a <= 223 && a != 0 && a != 10 && a != 127 )) || return 1
+  (( a != 100 || b < 64 || b > 127 )) || return 1
+  (( a != 169 || b != 254 )) || return 1
+  (( a != 172 || b < 16 || b > 31 )) || return 1
+  (( a != 192 || b != 168 )) || return 1
+  (( a != 198 || b < 18 || b > 19 )) || return 1
+  (( a != 224 )) || return 1
+  return 0
+}
+
+is_public_ipv6() {
+  local ip="${1,,}"
+  [[ "$ip" == *:* ]] || return 1
+  [[ "$ip" != ::1 && "$ip" != fc* && "$ip" != fd* && "$ip" != fe80:* ]] || return 1
+  return 0
+}
+
+is_public_address() {
   local value="${1,,}"
-  [[ -n "$value" ]] || die '必须填写公网域名，安装器不会自动探测公网 IP。'
-  [[ "$value" != *://* && "$value" != */* && "$value" != *' '* ]] || die "域名格式无效：$value"
-  [[ "$value" != 'localhost' && "$value" != *.local && "$value" != *.lan && "$value" != *.internal ]] || die "禁止使用内网主机名：$value"
-  [[ "$value" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)+$ ]] || die "必须使用可解析的公网域名（例如 www.example.com）：$value"
-  [[ ! "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die '不接受 IP 地址，请填写已经解析到服务器的公网域名。'
+  if [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    is_public_ipv4 "$value"
+    return
+  fi
+  if [[ "$value" == *:* ]]; then
+    is_public_ipv6 "$value"
+    return
+  fi
+  [[ "$value" != *://* && "$value" != */* && "$value" != *' '* ]] || return 1
+  [[ "$value" != 'localhost' && "$value" != *.local && "$value" != *.lan && "$value" != *.internal ]] || return 1
+  [[ "$value" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)+$ ]]
+}
+
+detect_public_ip() {
+  local endpoint candidate
+  for endpoint in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
+    candidate="$(curl -4 -fsSL --connect-timeout 3 --max-time 8 "$endpoint" 2>/dev/null | tr -d '\r\n ' || true)"
+    if is_public_ipv4 "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  for endpoint in https://api64.ipify.org https://ifconfig.co/ip; do
+    candidate="$(curl -6 -fsSL --connect-timeout 3 --max-time 8 "$endpoint" 2>/dev/null | tr -d '\r\n ' || true)"
+    if is_public_ipv6 "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+validate_public_address() {
+  local value="${1:-}"
+  is_public_address "$value" || die "必须使用公网 IP 或公网域名，当前地址无效：${value:-<空>}"
+}
+
+origin_host() {
+  [[ "$1" == *:* ]] && printf '[%s]' "$1" || printf '%s' "$1"
 }
 
 [[ "$(id -u)" == 0 ]] || die '请使用 root 执行安装。'
@@ -46,10 +102,16 @@ install_node() {
 }
 
 prompt_settings() {
-  local existing_domain='' existing_admin='admin'
-  [[ -f "$ENV_FILE" ]] && existing_domain="$(grep -E '^PUBLIC_DOMAIN=' "$ENV_FILE" | cut -d= -f2- || true)" && existing_admin="$(grep -E '^ADMIN_USERNAME=' "$ENV_FILE" | cut -d= -f2- || true)"
-  PUBLIC_DOMAIN="$(ask '公开公网域名（必须填写，不自动识别公网 IP）' "$existing_domain")"
-  ADMIN_DOMAIN="$(ask '管理公网域名（可与公开域名相同）' "${ADMIN_DOMAIN:-$PUBLIC_DOMAIN}")"
+  local existing_domain='' existing_admin='admin' detected_ip=''
+  [[ -f "$ENV_FILE" ]] && existing_domain="$(grep -E '^(PUBLIC_ADDRESS|PUBLIC_DOMAIN)=' "$ENV_FILE" | head -n 1 | cut -d= -f2- || true)" && existing_admin="$(grep -E '^ADMIN_USERNAME=' "$ENV_FILE" | cut -d= -f2- || true)"
+  detected_ip="$(detect_public_ip || true)"
+  if [[ -n "$detected_ip" ]]; then
+    say "已自动识别公网 IP：$detected_ip"
+  else
+    say '无法从外部服务自动识别公网 IP，将改为手动输入公网 IP 或域名。'
+  fi
+  PUBLIC_DOMAIN="$(ask '公开访问地址（自动识别结果，可改为公网域名）' "${existing_domain:-$detected_ip}")"
+  ADMIN_DOMAIN="$(ask '管理访问地址（默认与公开地址相同）' "${ADMIN_DOMAIN:-$PUBLIC_DOMAIN}")"
   ADMIN_USERNAME="$(ask '管理员账号' "$existing_admin")"
   ADMIN_PASSWORD="$(ask_secret '管理员密码（至少 12 位）')"
   [[ "${#ADMIN_PASSWORD}" -ge 12 ]] || die '管理员密码至少需要 12 位。'
@@ -58,9 +120,9 @@ prompt_settings() {
 }
 
 load_existing_env() {
-  PUBLIC_DOMAIN="$(grep -E '^PUBLIC_DOMAIN=' "$ENV_FILE" | cut -d= -f2- || true)"
+  PUBLIC_DOMAIN="$(grep -E '^(PUBLIC_ADDRESS|PUBLIC_DOMAIN)=' "$ENV_FILE" | head -n 1 | cut -d= -f2- || true)"
   [[ -n "$PUBLIC_DOMAIN" ]] || PUBLIC_DOMAIN="$(grep -E '^PUBLIC_APP_ORIGIN=' "$ENV_FILE" | cut -d= -f2- | sed -E 's#^https?://##; s#/$##' || true)"
-  ADMIN_DOMAIN="$(grep -E '^ADMIN_APP_ORIGIN=' "$ENV_FILE" | cut -d= -f2- | sed -E 's#^https?://##; s#/$##' || true)"
+  ADMIN_DOMAIN="$(grep -E '^(ADMIN_ADDRESS|ADMIN_DOMAIN)=' "$ENV_FILE" | head -n 1 | cut -d= -f2- || true)"
   ADMIN_USERNAME="$(grep -E '^ADMIN_USERNAME=' "$ENV_FILE" | cut -d= -f2- || true)"
   ADMIN_PASSWORD="$(grep -E '^ADMIN_PASSWORD=' "$ENV_FILE" | cut -d= -f2- || true)"
   APP_SECRET="$(grep -E '^APP_SECRET=' "$ENV_FILE" | cut -d= -f2- || true)"
@@ -69,17 +131,24 @@ load_existing_env() {
 
 write_env() {
   install -d -m 750 "$APP_DIR/data" "$APP_DIR/data/backups" "$APP_DIR/data/storage" "$APP_DIR/data/site-releases" "$APP_DIR/data/temp" "$APP_DIR/data/brand-assets" "$APP_DIR/data/updates"
+  local public_host admin_host public_origin admin_origin
+  public_host="$(origin_host "$PUBLIC_DOMAIN")"
+  admin_host="$(origin_host "$ADMIN_DOMAIN")"
+  public_origin="http://$public_host"
+  admin_origin="http://$admin_host"
   cat > "$ENV_FILE" <<EOF
 NODE_ENV=production
-# 仅供本机反向代理访问；公网入口必须使用上面填写的域名。
+# API 仅供本机反向代理访问；公网入口使用自动识别/手动确认的地址。
 API_HOST=127.0.0.1
 API_PORT=8787
 APP_HOST=127.0.0.1
+PUBLIC_ADDRESS=$PUBLIC_DOMAIN
+ADMIN_ADDRESS=$ADMIN_DOMAIN
 PUBLIC_DOMAIN=$PUBLIC_DOMAIN
 ADMIN_DOMAIN=$ADMIN_DOMAIN
-APP_ORIGIN=${PUBLIC_DOMAIN:+https://$PUBLIC_DOMAIN}
-PUBLIC_APP_ORIGIN=${PUBLIC_DOMAIN:+https://$PUBLIC_DOMAIN}
-ADMIN_APP_ORIGIN=${ADMIN_DOMAIN:+https://$ADMIN_DOMAIN}
+APP_ORIGIN=$public_origin
+PUBLIC_APP_ORIGIN=$public_origin
+ADMIN_APP_ORIGIN=$admin_origin
 ADMIN_USERNAME=$ADMIN_USERNAME
 ADMIN_PASSWORD=$ADMIN_PASSWORD
 APP_SECRET=$APP_SECRET
@@ -134,6 +203,7 @@ EOF
 write_nginx() {
   command -v nginx >/dev/null || return 0
   local domain="${PUBLIC_DOMAIN:-_}" admin_domain="${ADMIN_DOMAIN:-$PUBLIC_DOMAIN}"
+  [[ "$domain" == *:* ]] && domain='_'
   mkdir -p /etc/nginx/conf.d
   cat > /etc/nginx/conf.d/jtwz.conf <<EOF
 server {
@@ -165,15 +235,18 @@ install_panel_runtime() {
 main() {
   say "JTWZ 安装向导（$PANEL）"
   if [[ -f "$ENV_FILE" && -s "$ENV_FILE" ]]; then load_existing_env; else prompt_settings; fi
-  validate_public_domain "$PUBLIC_DOMAIN"
-  validate_public_domain "$ADMIN_DOMAIN"
+  validate_public_address "$PUBLIC_DOMAIN"
+  validate_public_address "$ADMIN_DOMAIN"
   install_application
   install_panel_runtime
-  if [[ -f "$PACKAGE_DIR/jtwzctl" ]]; then install -m 755 "$PACKAGE_DIR/jtwzctl" /usr/local/bin/jtwzctl; fi
+  if [[ -f "$PACKAGE_DIR/jtwzctl" ]]; then
+    install -m 755 "$PACKAGE_DIR/jtwzctl" /usr/local/bin/jtwzctl
+    ln -sfn /usr/local/bin/jtwzctl /usr/local/bin/jt
+  fi
   say '安装完成。'
   say "查看状态：jtwzctl status"
   say "交互管理：jtwzctl menu"
-  [[ -n "${PUBLIC_DOMAIN:-}" ]] && say "公开地址：https://$PUBLIC_DOMAIN"
+  [[ -n "${PUBLIC_DOMAIN:-}" ]] && say "公开地址：http://$(origin_host "$PUBLIC_DOMAIN")"
 }
 
 main "$@"

@@ -205,7 +205,7 @@ uninstall() {
   fi
   if [[ "$mode" == purge && -d "$APP_DIR/data" ]]; then rm -rf "$APP_DIR/data"; fi
   rm -rf "$APP_DIR"
-  rm -f /usr/local/bin/jtwzctl
+  rm -f /usr/local/bin/jtwzctl /usr/local/bin/jt
   say 'JTWZ 程序已卸载。SSL 证书不会被自动删除，如需清理请使用 certbot delete。'
 }
 

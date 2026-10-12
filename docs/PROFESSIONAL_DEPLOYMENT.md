@@ -32,6 +32,16 @@ https://api.example.com       API 与运行时域名入口
 
 正式包从 [GitHub Releases](https://github.com/wstimin/JTWZ/releases) 获取。源码仓库不包含生成的 ZIP/TAR。
 
+### 一键部署（推荐）
+
+一键入口支持 3x-ui 风格的一行命令：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/wstimin/JTWZ/main/deploy/one-click/install.sh)
+```
+
+也可以下载 `jtwz-one-click-vX.Y.Z.tar.gz` 后执行 `sudo ./install.sh`。安装器会从多个外部服务自动识别公网 IP，显示结果并允许改填公网域名；识别失败才要求手动输入。它拒绝回环、私网、链路本地和 CGNAT 地址。安装完成后使用 `sudo jt` 调出交互菜单。
+
 ### 宝塔
 
 ```bash
@@ -42,8 +52,6 @@ sudo ./install.sh
 
 安装向导会写入生产 `.env`、构建目录、systemd 服务和 Nginx 配置。完成后将 DNS 指向服务器，再通过管理域名登录。
 
-安装器不会自动识别公网 IP。公开域名和管理域名必须由管理员手动填写为已经解析到服务器的公网域名；`localhost`、私网主机名和 IP 地址会被拒绝。部署文件中的 `127.0.0.1` 仅是 API 与本机反向代理的内部绑定，不是对外访问地址。
-
 ### 1Panel
 
 ```bash
@@ -53,20 +61,6 @@ sudo ./install.sh
 ```
 
 安装器会生成 Compose 环境并启动容器，应用数据保存在 Docker volume。域名和 HTTPS 可在 1Panel 反向代理中绑定。
-
-### 一键部署
-
-```bash
-tar -xzf jtwz-one-click-vX.Y.Z.tar.gz
-cd jtwz-one-click-vX.Y.Z
-sudo ./install.sh
-sudo jtwzctl menu
-```
-
-`jtwzctl` 支持服务状态、域名增删改查、SSL 增删改与续期、配置修改、管理员账号密码修改、完整迁移备份和两种卸载模式：
-
-- 保留数据：停止服务并把数据移动到 `/opt/jtwz-data-时间戳`；
-- 清除数据：删除应用数据和 Docker 数据卷，证书文件不会被脚本自动删除。
 
 ## 4. 源码部署
 

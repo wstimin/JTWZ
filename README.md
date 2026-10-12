@@ -34,7 +34,23 @@ npm start
 
 ## 2. 服务器部署教程
 
-### 方案 A：宝塔
+### 方案 A：一键部署（推荐，3x-ui 风格）
+
+一键脚本是首选入口，支持下载发行包后执行，也支持服务器直接运行一行命令：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/wstimin/JTWZ/main/deploy/one-click/install.sh)
+```
+
+脚本会自动识别服务器公网 IPv4（失败时再提示手动输入公网 IP 或域名），生成生产配置并安装服务。它不会把 `127.0.0.1`、`192.168.x.x`、`10.x.x.x` 等内网地址作为访问地址。安装完成后使用：
+
+```bash
+sudo jt
+```
+
+即可调出交互管理菜单；`sudo jtwzctl menu` 仍然兼容。菜单支持状态查看、域名增删改查、SSL 证书管理、配置修改、账号密码修改、完整备份、服务重启和保留/清除数据卸载。
+
+### 方案 B：宝塔
 
 1. 从 [Releases](https://github.com/wstimin/JTWZ/releases) 下载 `jtwz-baota-vX.Y.Z.zip`。
 2. 上传到服务器并解压，进入解压目录。
@@ -48,9 +64,9 @@ npm start
 5. 将 DNS 解析指向服务器，安装器会生成 Nginx 和 systemd 配置。
 6. 访问管理域名登录后台，在“系统设置”中完成品牌、对象存储、备份和 HTTPS 配置。
 
-安装器不会自动探测公网 IP，也不会把 `localhost`、私网主机名或 IP 地址当作站点域名；生产安装必须手动填写已经解析到服务器的公网域名。`127.0.0.1` 只用于服务器内部 API 与反向代理之间的本机通信。
+宝塔安装器同样会优先自动识别公网 IP；也可以改填已经解析到服务器的公网域名。`127.0.0.1` 只用于服务器内部 API 与反向代理之间的本机通信。
 
-### 方案 B：1Panel
+### 方案 C：1Panel
 
 1. 下载 `jtwz-1panel-vX.Y.Z.tar.gz` 并解压。
 2. 执行：
@@ -61,25 +77,6 @@ npm start
 
 3. 向导会生成 Compose 环境并启动容器；数据保存在 Docker volume 中。
 4. 在 1Panel 或反向代理中绑定公开域名和管理域名，再登录后台完成系统设置。
-
-### 方案 C：一键部署
-
-```bash
-tar -xzf jtwz-one-click-vX.Y.Z.tar.gz
-cd jtwz-one-click-vX.Y.Z
-sudo ./install.sh
-sudo jtwzctl menu
-```
-
-`jtwzctl` 是真实的服务器管理入口，支持：
-
-- 查看系统、Node、磁盘、服务和 API 健康状态；
-- 域名新增、修改、删除和列表查询；
-- SSL 证书签发、删除、换域名和续期；
-- 生产配置查看、修改和服务重启；
-- 管理员用户名和密码修改；
-- 完整迁移备份创建与查询；
-- 卸载并保留数据，或卸载并清除数据。
 
 SSL 操作要求域名已经解析到当前服务器，并由 certbot/Nginx 完成验证。
 
