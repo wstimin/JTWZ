@@ -163,7 +163,7 @@ npm --prefix "$NEXT" ci --omit=dev
 PREFLIGHT_LOG="$STAGING/production-preflight.log"
 (
   cd "$NEXT"
-  NODE_ENV=production API_HOST=127.0.0.1 API_PORT=0 DATA_DIR="$STAGING/preflight-data" \
+  exec env NODE_ENV=production API_HOST=127.0.0.1 API_PORT=0 DATA_DIR="$STAGING/preflight-data" \
     ADMIN_USERNAME=update-preflight ADMIN_PASSWORD=update-preflight-password APP_SECRET=update-preflight-secret \
     ALLOW_LOCAL_STORAGE_IN_PRODUCTION=true node dist-server/index.js > "$PREFLIGHT_LOG" 2>&1
 ) &
@@ -192,6 +192,12 @@ done
 for item in package.json package-lock.json dist dist-server node_modules; do
   mv "$NEXT/$item" "$TARGET_DIR/"
 done
+# Recreate the production dependency tree at its final path. This also guards
+# against path-specific copy/move anomalies before systemd sees the release.
+npm --prefix "$TARGET_DIR" ci --omit=dev
+if id -u "$SERVICE_USER" >/dev/null 2>&1; then
+  runuser -u "$SERVICE_USER" -- node -e "import('${TARGET_DIR}/dist-server/sitePublisher.js')"
+fi
 if [[ -f "$SOURCE_PACKAGE/installer/jtwzctl" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwzctl" /usr/local/bin/jtwzctl; fi
 if [[ -f "$SOURCE_PACKAGE/installer/jtwz-update" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwz-update" /usr/local/bin/jtwz-update; fi
 if [[ -f "$SOURCE_PACKAGE/installer/jtwz-update-dispatch" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwz-update-dispatch" /usr/local/bin/jtwz-update-dispatch; fi
