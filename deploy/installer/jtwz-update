@@ -83,6 +83,12 @@ sanitize_legacy_public_key() {
   mv -f "$temporary" "$CONFIG_ENV"
 }
 
+prepare_runtime_permissions() {
+  if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then return 0; fi
+  chown -R "root:$SERVICE_GROUP" "$@"
+  chmod -R u+rwX,g+rX,o-rwx "$@"
+}
+
 verify_signed_artifact
 write_state 'preparing' '更新包签名复核通过，正在解压并安装依赖。'
 
@@ -159,6 +165,7 @@ VERSION="$(node -e "process.stdout.write(require(process.argv[1]).version || '')
 NEXT="$(mktemp -d "$STATE_DIR/next.XXXXXX")"
 cp -a "$SOURCE_APP/package.json" "$SOURCE_APP/package-lock.json" "$SOURCE_APP/dist" "$SOURCE_APP/dist-server" "$NEXT/"
 npm --prefix "$NEXT" ci --omit=dev
+prepare_runtime_permissions "$NEXT/package.json" "$NEXT/package-lock.json" "$NEXT/dist" "$NEXT/dist-server" "$NEXT/node_modules"
 
 PREFLIGHT_LOG="$STAGING/production-preflight.log"
 (
@@ -195,6 +202,7 @@ done
 # Recreate the production dependency tree at its final path. This also guards
 # against path-specific copy/move anomalies before systemd sees the release.
 npm --prefix "$TARGET_DIR" ci --omit=dev
+prepare_runtime_permissions "$TARGET_DIR/package.json" "$TARGET_DIR/package-lock.json" "$TARGET_DIR/dist" "$TARGET_DIR/dist-server" "$TARGET_DIR/node_modules"
 if id -u "$SERVICE_USER" >/dev/null 2>&1; then
   runuser -u "$SERVICE_USER" -- node -e "import('${TARGET_DIR}/dist-server/sitePublisher.js')"
 fi
