@@ -41,6 +41,12 @@ async function domainRoutingStatus(hostname: string) {
     ready: ipv4.length > 0 || ipv6.length > 0,
   }
 }
+
+async function assertCertificateRouting(hostname: string) {
+  if (certificateProviderStatus().provider !== 'certbot') return
+  const routing = await domainRoutingStatus(hostname)
+  if (!routing.ready) throw new HttpError(409, `域名尚未解析到服务器。请先添加 A 记录：@ → ${routing.value || '服务器公网 IP'}`)
+}
 const adminRequestBuckets = new Map<string, { count: number; resetAt: number }>()
 let activeAdminBasePath = config.adminBasePath
 const disabledAdminBasePaths = new Set(config.disabledAdminBasePaths.filter((path) => path !== activeAdminBasePath))
@@ -230,12 +236,9 @@ async function runCertificateOperationTask(taskId: string, adminId: string | nul
   const domain = db.prepare('SELECT hostname, dns_status FROM domains WHERE id = ?').get(domainId) as Row | undefined
   if (!domain) throw new HttpError(404, '域名不存在')
   if (String(domain.dns_status) !== 'verified') throw new HttpError(409, '请先完成 DNS 所有权验证')
-  if (certificateProviderStatus().provider === 'certbot') {
-    const routing = await domainRoutingStatus(String(domain.hostname))
-    if (!routing.ready) throw new HttpError(409, `域名尚未解析到服务器。请先添加 A 记录：@ → ${routing.value || '服务器公网 IP'}`)
-  }
   updateTask(taskId, { status: 'running', progress: 15, message: '正在连接证书服务商', log: { level: 'info', message: `开始处理 ${String(domain.hostname)} 的证书` } })
   try {
+    await assertCertificateRouting(String(domain.hostname))
     const certificate = await issueManagedCertificate(domainId, String(domain.hostname), certificateId)
     const action = certificateId ? 'certificate_renewed' : 'certificate_issued'
     audit(adminId, action, certificateId ? 'certificate' : 'domain', certificateId || domainId, String(domain.hostname))
@@ -1267,6 +1270,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const current = db.prepare('SELECT certificates.*, domains.hostname, domains.dns_status FROM certificates JOIN domains ON domains.id = certificates.domain_id WHERE certificates.id = ?').get(id) as Row | undefined
     if (!current) throw new HttpError(404, '证书记录不存在')
     if (String(current.dns_status) !== 'verified') throw new HttpError(409, '域名 DNS 所有权验证已失效，请重新验证')
+    await assertCertificateRouting(String(current.hostname))
     const task = createTask({ kind: 'certificate_renew', label: `续期 ${String(current.hostname)} 的 HTTPS 证书`, entityType: 'domain', entityId: String(current.domain_id), input: { domainId: String(current.domain_id), certificateId: id }, retryable: true })
     sendJson(response, 200, await runCertificateOperationTask(task.id, admin.id))
     return
@@ -1381,6 +1385,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const row = db.prepare("SELECT hostname, dns_status FROM domains WHERE id = ?").get(id) as Row | undefined
     if (!row) throw new HttpError(404, '域名不存在')
     if (String(row.dns_status) !== 'verified') throw new HttpError(409, '请先完成 DNS 所有权验证')
+    await assertCertificateRouting(String(row.hostname))
     const task = createTask({ kind: 'certificate_issue', label: `签发 ${String(row.hostname)} 的 HTTPS 证书`, entityType: 'domain', entityId: id, input: { domainId: id }, retryable: true })
     sendJson(response, 200, await runCertificateOperationTask(task.id, admin.id))
     return
