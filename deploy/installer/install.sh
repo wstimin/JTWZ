@@ -121,18 +121,19 @@ is_ip_address() {
 
 install_reverse_proxy_tools() {
   [[ "$PANEL" == 'standalone' ]] || return 0
-  is_ip_address "$PUBLIC_DOMAIN" && return 0
-  if command -v nginx >/dev/null && command -v certbot >/dev/null; then return 0; fi
-  say '检测到域名部署，正在安装 Nginx 与 Certbot。'
-  if command -v apt-get >/dev/null; then
-    apt-get update -y
-    apt-get install -y nginx certbot python3-certbot-nginx
-  elif command -v dnf >/dev/null; then
-    dnf install -y nginx certbot python3-certbot-nginx
-  else
-    die '无法自动安装 Nginx 与 Certbot，请先手动安装后重试。'
+  if ! command -v nginx >/dev/null || ! command -v certbot >/dev/null; then
+    say '正在安装自定义域名所需的 Nginx 与 Certbot。'
+    if command -v apt-get >/dev/null; then
+      apt-get update -y
+      apt-get install -y nginx certbot python3-certbot-nginx
+    elif command -v dnf >/dev/null; then
+      dnf install -y nginx certbot python3-certbot-nginx
+    else
+      die '无法自动安装 Nginx 与 Certbot，请先手动安装后重试。'
+    fi
   fi
   systemctl enable --now nginx
+  CERTIFICATE_PROVIDER_VALUE='certbot'
 }
 
 select_access_mode() {

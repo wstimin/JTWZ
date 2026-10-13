@@ -1,5 +1,5 @@
 import { createHash, verify as verifySignature } from 'node:crypto'
-import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, createWriteStream, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rename } from 'node:fs/promises'
 import { basename, resolve, sep } from 'node:path'
 import { Readable } from 'node:stream'
@@ -104,7 +104,6 @@ export async function checkForUpdate() {
     checkedAt: new Date().toISOString(),
     state: readState(),
   }
-  writeFileSync(statePath, JSON.stringify(status, null, 2), 'utf8')
   return status
 }
 
@@ -160,7 +159,11 @@ export async function installUpdate() {
   const staged = { status: 'staged', version: status.manifest.version, stagedAt: new Date().toISOString(), artifact, manifest: status.manifest, rollbackBackup }
   writeFileSync(statePath, JSON.stringify(staged, null, 2), 'utf8')
   if (!config.updateApplyCommand) return { ...staged, applyStarted: false, message: '更新包已校验并暂存；配置安全更新执行器后可自动切换版本。' }
-  const child = spawn(config.updateApplyCommand, [...configuredApplyArgs(), artifact.path], { windowsHide: true, detached: true, stdio: 'ignore' })
+  const executorLogPath = resolve(updateDir, 'executor.log')
+  rmSync(executorLogPath, { force: true })
+  const executorLog = openSync(executorLogPath, 'a', 0o600)
+  const child = spawn(config.updateApplyCommand, [...configuredApplyArgs(), artifact.path], { windowsHide: true, detached: true, stdio: ['ignore', executorLog, executorLog] })
+  closeSync(executorLog)
   await new Promise<void>((resolvePromise, reject) => {
     child.once('spawn', resolvePromise)
     child.once('error', reject)
@@ -171,7 +174,8 @@ export async function installUpdate() {
   })
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 500))
   if (child.exitCode !== null && child.exitCode !== 0) {
-    const detail = `安全更新执行器立即退出（代码 ${child.exitCode}），请重新运行一键安装脚本修复执行权限`
+    const executorDetail = existsSync(executorLogPath) ? readFileSync(executorLogPath, 'utf8').trim().split(/\r?\n/).slice(-4).join('；') : ''
+    const detail = `安全更新执行器立即退出（代码 ${child.exitCode}）${executorDetail ? `：${executorDetail}` : '，请重新运行一键安装脚本修复执行权限'}`
     const failed = { ...staged, status: 'executor_failed', detail, failedAt: new Date().toISOString() }
     writeFileSync(statePath, JSON.stringify(failed, null, 2), 'utf8')
     throw new Error(detail)
