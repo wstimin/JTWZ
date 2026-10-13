@@ -34,7 +34,7 @@ function domainApplyArgs() {
   }
 }
 
-async function runDomainAction(action: 'route' | 'ensure' | 'remove' | 'purge', hostname: string) {
+async function runDomainAction(action: 'route' | 'ensure' | 'check' | 'remove' | 'purge', hostname: string) {
   if (!config.domainApplyCommand) return { configured: false }
   try {
     const result = await execFileAsync(config.domainApplyCommand, [...domainApplyArgs(), action, hostname], {
@@ -59,6 +59,13 @@ export function configureDomainRoute(hostname: string) {
 
 export function removeDomainRoute(hostname: string) {
   return runDomainAction('purge', hostname)
+}
+
+export async function verifyCertificateDeployment(hostname: string) {
+  const status = certificateProviderStatus()
+  if (status.provider !== 'certbot' || !status.configured) return { checked: false }
+  await runDomainAction('check', hostname)
+  return { checked: true }
 }
 
 export async function issueCertificate(hostname: string): Promise<CertificateProviderResult> {

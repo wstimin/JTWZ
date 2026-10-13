@@ -321,14 +321,18 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
   }
 
   async function removeCertificate(item: CertificateRecord) {
-    if (!await confirm({ title: '删除 SSL 证书', message: `确定删除 ${item.issuer || '当前'} 证书记录吗？Webhook 证书会同时通知服务商撤销。`, confirmLabel: '删除证书', tone: 'danger' })) return
+    const liveManagedCertificate = item.provider !== 'manual' && (item.status === 'active' || item.status === 'expiring')
+    const message = liveManagedCertificate
+      ? `确定删除 ${item.issuer || '当前'} 证书记录吗？如果这是该域名最后一张有效托管证书，服务器上的证书也会被删除。`
+      : `确定删除 ${item.issuer || item.provider || '当前'} 记录吗？失败、过期和外部登记记录只会从列表中清理，不会删除该域名正在使用的证书。`
+    if (!await confirm({ title: '删除 SSL 证书', message, confirmLabel: liveManagedCertificate ? '删除证书' : '清理记录', tone: 'danger' })) return
     try {
-      const result = await apiJson<{ domain: DomainRecord }>(`/api/certificates/${encodeURIComponent(item.id)}`, 'DELETE')
+      const result = await apiJson<{ domain: DomainRecord; providerRemoved: boolean }>(`/api/certificates/${encodeURIComponent(item.id)}`, 'DELETE')
       setCertificates((current) => current.filter((entry) => entry.id !== item.id))
       setDomains((current) => current.map((entry) => entry.id === result.domain.id ? result.domain : entry))
       setDnsDomain(result.domain)
       setDnsInstructions((current) => current ? { ...current, certificateStatus: result.domain.certificateStatus || 'pending' } : current)
-      notify('证书记录已删除', 'info')
+      notify(result.providerRemoved ? '证书及服务商部署已删除' : '证书记录已清理，现有 HTTPS 部署未受影响', 'info')
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : '证书删除失败', 'info')
     }
@@ -396,7 +400,7 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
           <div className="form-note"><ShieldCheck /><div><strong>添加一条 TXT 记录</strong><span>{dnsInstructions.dnsProvider.configured ? '已接入 DNS 服务商，可自动写入；也可以手动添加以下记录。' : '请登录域名 DNS 服务商控制台，添加以下记录。生效后点击“立即验证”。'}</span></div></div>
           {canManage && dnsInstructions.dnsProvider.configured ? <button className="button button--secondary" type="button" onClick={() => void publishDns()} disabled={publishingDns}><ShieldCheck /> {publishingDns ? '正在写入…' : `自动写入 ${dnsInstructions.dnsProvider.provider === 'cloudflare' ? 'Cloudflare' : 'DNS'}`}</button> : null}
           {canManage && dnsInstructions.routeAutomationConfigured ? <button className="button button--secondary" type="button" onClick={() => void applyDomainRoute()} disabled={applyingRoute}><RefreshCw className={applyingRoute ? 'is-spinning' : undefined} /> {applyingRoute ? '正在修复入口…' : '修复域名入口'}</button> : null}
-          {canManage && dnsInstructions.certificateStatus !== 'active' && dnsInstructions.certificateProvider.configured ? <button className="button button--secondary" type="button" onClick={() => void issueCertificate()} disabled={issuingCertificate || dnsInstructions.dnsStatus !== 'verified' || !dnsInstructions.routing.ready} title={!dnsInstructions.routing.ready ? '请先添加指向服务器的 A 记录' : undefined}><ShieldCheck /> {issuingCertificate ? '正在启用 HTTPS…' : '启用 HTTPS'}</button> : null}
+          {canManage && dnsInstructions.certificateProvider.configured ? <button className="button button--secondary" type="button" onClick={() => void issueCertificate()} disabled={issuingCertificate || dnsInstructions.dnsStatus !== 'verified' || !dnsInstructions.routing.ready} title={!dnsInstructions.routing.ready ? '请先添加指向服务器的 A 记录' : undefined}><ShieldCheck /> {issuingCertificate ? '正在配置 HTTPS…' : dnsInstructions.certificateStatus === 'active' ? '重新部署 HTTPS' : '启用 HTTPS'}</button> : null}
           <div className="dns-record-grid"><div><span>记录类型</span><strong>{dnsInstructions.type}</strong></div><div><span>主机记录</span><strong>{dnsInstructions.name}</strong><button type="button" onClick={() => { void navigator.clipboard?.writeText(dnsInstructions.name); notify('主机记录已复制') }}><Copy /></button></div><div className="dns-record-value"><span>记录值</span><strong>{dnsInstructions.value}</strong><button type="button" onClick={() => { void navigator.clipboard?.writeText(dnsInstructions.value); notify('TXT 记录值已复制') }}><Copy /></button></div></div>
           <div className="form-note"><Globe2 /><div><strong>添加域名解析记录</strong><span>TXT 用于证明所有权；A 记录才能把访客流量发送到这台服务器。</span></div></div>
           <div className="dns-record-grid"><div><span>记录类型</span><strong>{dnsInstructions.routing.type}</strong></div><div><span>主机记录</span><strong>{dnsInstructions.routing.name}</strong><button type="button" onClick={() => { void navigator.clipboard?.writeText(dnsInstructions.routing.name); notify('A 记录主机名已复制') }}><Copy /></button></div><div className="dns-record-value"><span>记录值</span><strong>{dnsInstructions.routing.value || '服务器公网 IP'}</strong><button type="button" onClick={() => { void navigator.clipboard?.writeText(dnsInstructions.routing.value); notify('服务器地址已复制') }}><Copy /></button></div></div>

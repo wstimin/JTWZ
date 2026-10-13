@@ -7,7 +7,7 @@ REQUEST_FILE="$QUEUE_DIR/apply.request"
 DOMAIN_EXECUTOR='/usr/local/bin/jtwz-domain'
 
 die() { printf '[JTWZ Domain Dispatch][错误] %s\n' "$*" >&2; exit 1; }
-valid_action() { [[ "$1" =~ ^(route|ensure|remove|purge)$ ]]; }
+valid_action() { [[ "$1" =~ ^(route|ensure|check|remove|purge)$ ]]; }
 valid_hostname() { [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; }
 
 install -d -m 750 "$QUEUE_DIR"
@@ -35,7 +35,7 @@ fi
 
 action="${1:-}"
 hostname="${2:-}"
-valid_action "$action" || die '操作仅支持 route、ensure、remove 或 purge。'
+valid_action "$action" || die '操作仅支持 route、ensure、check、remove 或 purge。'
 valid_hostname "$hostname" || die '域名格式无效。'
 command -v flock >/dev/null 2>&1 || die '缺少 flock，无法提交域名任务。'
 exec 9>"$QUEUE_DIR/submit.lock"

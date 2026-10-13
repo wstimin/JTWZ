@@ -14,6 +14,7 @@ const base = `http://127.0.0.1:${port}`
 let child
 let webhook
 let failNextCertificate = false
+const providerActions = []
 
 function crc32(buffer) {
   let crc = 0xffffffff
@@ -89,6 +90,7 @@ try {
     const chunks = []
     for await (const chunk of request) chunks.push(chunk)
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
+    providerActions.push(body.action)
     response.setHeader('Content-Type', 'application/json')
     if (body.action === 'issue_certificate') {
       if (failNextCertificate) {
@@ -152,10 +154,22 @@ try {
   assert.ok(failedCertificateTask)
   const recoveredCertificate = await json(`/api/tasks/${failedCertificateTask.id}/retry`, 'POST')
   assert.equal(recoveredCertificate.task.status, 'succeeded')
+  assert.equal(recoveredCertificate.certificate.id, issued.certificate.id, 'repair retries must reuse the managed certificate record')
+  const staleDb = new DatabaseSync(resolve(dataDir, 'platform.db'))
+  const staleTimestamp = new Date().toISOString()
+  staleDb.prepare(`INSERT INTO certificates
+    (id, domain_id, provider, issuer, serial_number, external_ref, issued_at, expires_at, status, auto_renew, note, last_error, updated_at, created_at)
+    VALUES (?, ?, 'webhook', '', '', '', NULL, NULL, 'error', 1, '', 'old failed request', ?, ?)`)
+    .run('stale-failed-certificate', createdDomain.domain.id, staleTimestamp, staleTimestamp)
+  staleDb.close()
+  const deletesBeforeStaleCleanup = providerActions.filter((action) => action === 'delete_certificate').length
+  await json('/api/certificates/stale-failed-certificate', 'DELETE')
+  assert.equal(providerActions.filter((action) => action === 'delete_certificate').length, deletesBeforeStaleCleanup, 'cleaning a failed record must not revoke the live certificate')
   const external = await json(`/api/domains/${createdDomain.domain.id}/certificates`, 'POST', { issuer: 'External Test CA', serialNumber: 'EXT-1', expiresAt: new Date(Date.now() + 60 * 86400000).toISOString(), note: 'isolated integration test' })
   await json(`/api/certificates/${external.certificate.id}`, 'PATCH', { note: 'updated lifecycle record', autoRenew: false })
   await json(`/api/certificates/${external.certificate.id}`, 'DELETE')
   await json(`/api/certificates/${issued.certificate.id}`, 'DELETE')
+  assert.equal(providerActions.filter((action) => action === 'delete_certificate').length, deletesBeforeStaleCleanup + 1, 'deleting an active webhook certificate must revoke its distinct provider deployment')
 
   const rule = await json('/api/redirects', 'POST', { domainId: createdDomain.domain.id, name: '文档入口', sourcePath: '/docs/*', target: 'https://example.org/help', enabled: true })
   await json(`/api/redirects/${rule.redirectRule.id}`, 'PUT', { target: 'https://example.org/guides', priority: 20 })

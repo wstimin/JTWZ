@@ -10,7 +10,7 @@ import { clientIp, HttpError, parseCookies, readJson, sendHtml, sendJson } from 
 import { extractStaticSite } from './sitePublisher.js'
 import { completeMultipartUpload, completeStorageUpload, createMultipartPartUpload, createMultipartUpload, createStorageDownload, createStorageUpload, isStorageConfigured, localFilePath, objectStorageMode, refreshObjectStorageMode, removeObject, uploadLocal } from './objectStorage.js'
 import { dnsProviderStatus, publishVerificationRecord } from './dnsProvider.js'
-import { certificateProviderStatus, configureDomainRoute, deleteCertificate, domainAutomationConfigured, issueCertificate, removeDomainRoute, type CertificateProviderResult } from './certificateProvider.js'
+import { certificateProviderStatus, configureDomainRoute, deleteCertificate, domainAutomationConfigured, issueCertificate, removeDomainRoute, verifyCertificateDeployment, type CertificateProviderResult } from './certificateProvider.js'
 import { backupFilePath, createBackup, listBackups, restoreBackupWithRollback, startBackupScheduler } from './backup.js'
 import { notificationsConfigured, notifyAlert } from './notifications.js'
 import { formatBytes, removeStoredFile, safeStoragePath, signedDownloadPath, signedStorageUpload, verifyDownloadSignature, verifyStorageUpload, writeRequestToFile } from './storage.js'
@@ -206,8 +206,10 @@ async function issueManagedCertificate(domainId: string, hostname: string, exist
   const provider = certificateProviderStatus()
   if (!provider.configured) throw new HttpError(503, 'HTTPS 证书服务商尚未完成配置')
   const timestamp = new Date().toISOString()
-  const certificateId = existingId || randomUUID()
-  if (!existingId) {
+  const reusable = existingId ? undefined : db.prepare("SELECT id FROM certificates WHERE domain_id = ? AND provider = ? AND status IN ('pending', 'error') ORDER BY created_at DESC LIMIT 1")
+    .get(domainId, provider.provider) as Row | undefined
+  const certificateId = existingId || (reusable ? String(reusable.id) : randomUUID())
+  if (!existingId && !reusable) {
     db.prepare(`INSERT INTO certificates
       (id, domain_id, provider, issuer, serial_number, external_ref, issued_at, expires_at, status, auto_renew, note, last_error, updated_at, created_at)
       VALUES (?, ?, ?, '', '', '', NULL, NULL, 'pending', 1, '', '', ?, ?)`)
@@ -284,6 +286,38 @@ function startCertificateRenewalScheduler() {
   const timer = setInterval(() => { void renewDueCertificates() }, 6 * 60 * 60 * 1000)
   timer.unref()
   setTimeout(() => { void renewDueCertificates() }, 30_000).unref()
+}
+
+async function reconcileCertificateDeployments() {
+  const provider = certificateProviderStatus()
+  if (provider.provider !== 'certbot' || !provider.configured) return
+  const rows = db.prepare(`SELECT certificates.id, certificates.domain_id, domains.hostname FROM certificates
+    JOIN domains ON domains.id = certificates.domain_id
+    WHERE certificates.provider = 'certbot' AND certificates.status IN ('active', 'expiring')
+      AND certificates.id = (SELECT managed.id FROM certificates managed WHERE managed.domain_id = certificates.domain_id
+        AND managed.provider = 'certbot' AND managed.status IN ('active', 'expiring') ORDER BY managed.created_at DESC LIMIT 1)`)
+    .all() as Row[]
+  for (const row of rows) {
+    const domainId = String(row.domain_id)
+    const hostname = String(row.hostname)
+    try {
+      await verifyCertificateDeployment(hostname)
+    } catch (error) {
+      const detail = `检测到 HTTPS 部署失效：${error instanceof Error ? error.message : '证书文件或 443 配置不存在'}`
+      db.prepare("UPDATE certificates SET status = 'error', last_error = ?, updated_at = ? WHERE domain_id = ? AND provider = 'certbot' AND status IN ('active', 'expiring')")
+        .run(detail, new Date().toISOString(), domainId)
+      syncDomainCertificateStatus(domainId)
+      try {
+        await assertCertificateRouting(hostname)
+        const task = createTask({ kind: 'certificate_issue', label: `修复 ${hostname} 的 HTTPS 部署`, entityType: 'domain', entityId: domainId, input: { domainId, certificateId: String(row.id) }, retryable: true })
+        await runCertificateOperationTask(task.id, null)
+      } catch (repairError) {
+        const repairDetail = `${hostname}: ${repairError instanceof Error ? repairError.message : 'HTTPS 自动修复失败'}`
+        audit(null, 'certificate_repair_failed', 'domain', domainId, repairDetail)
+        notifyAlert({ type: 'certificate_failed', title: 'HTTPS 部署自动修复失败', detail: repairDetail, entityId: domainId })
+      }
+    }
+  }
 }
 
 function listRedirectRules() {
@@ -1257,11 +1291,22 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const id = decodeURIComponent(certificateMatch[1])
     const current = db.prepare('SELECT certificates.*, domains.hostname FROM certificates JOIN domains ON domains.id = certificates.domain_id WHERE certificates.id = ?').get(id) as Row | undefined
     if (!current) throw new HttpError(404, '证书记录不存在')
-    await deleteCertificate(String(current.hostname), String(current.external_ref || ''), String(current.provider || ''))
+    const provider = String(current.provider || '')
+    const live = ['active', 'expiring'].includes(String(current.status))
+    let providerRemoved = false
+    if (provider !== 'manual' && live) {
+      const otherLive = provider === 'certbot'
+        ? db.prepare("SELECT id FROM certificates WHERE domain_id = ? AND provider = 'certbot' AND status IN ('active', 'expiring') AND id <> ? LIMIT 1").get(String(current.domain_id), id)
+        : db.prepare("SELECT id FROM certificates WHERE domain_id = ? AND provider = ? AND external_ref = ? AND status IN ('active', 'expiring') AND id <> ? LIMIT 1").get(String(current.domain_id), provider, String(current.external_ref || ''), id)
+      if (!otherLive) {
+        await deleteCertificate(String(current.hostname), String(current.external_ref || ''), provider)
+        providerRemoved = true
+      }
+    }
     db.prepare('DELETE FROM certificates WHERE id = ?').run(id)
     syncDomainCertificateStatus(String(current.domain_id))
     audit(admin.id, 'certificate_delete', 'certificate', id, `${String(current.hostname)} / ${String(current.issuer)}`)
-    sendJson(response, 200, { ok: true, domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(String(current.domain_id)) as Row) })
+    sendJson(response, 200, { ok: true, providerRemoved, domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(String(current.domain_id)) as Row) })
     return
   }
   const certificateRenewMatch = url.pathname.match(/^\/api\/certificates\/([^/]+)\/renew$/)
@@ -1386,7 +1431,9 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     if (!row) throw new HttpError(404, '域名不存在')
     if (String(row.dns_status) !== 'verified') throw new HttpError(409, '请先完成 DNS 所有权验证')
     await assertCertificateRouting(String(row.hostname))
-    const task = createTask({ kind: 'certificate_issue', label: `签发 ${String(row.hostname)} 的 HTTPS 证书`, entityType: 'domain', entityId: id, input: { domainId: id }, retryable: true })
+    const provider = certificateProviderStatus().provider
+    const existing = provider === 'manual' ? undefined : db.prepare("SELECT id FROM certificates WHERE domain_id = ? AND provider = ? AND status IN ('active', 'expiring') ORDER BY created_at DESC LIMIT 1").get(id, provider) as Row | undefined
+    const task = createTask({ kind: 'certificate_issue', label: `${existing ? '修复' : '签发'} ${String(row.hostname)} 的 HTTPS 证书`, entityType: 'domain', entityId: id, input: { domainId: id, ...(existing ? { certificateId: String(existing.id) } : {}) }, retryable: true })
     sendJson(response, 200, await runCertificateOperationTask(task.id, admin.id))
     return
   }
@@ -2208,5 +2255,6 @@ server.listen(config.port, config.host, () => {
   recoverInterruptedTasks()
   startBackupScheduler()
   startCertificateRenewalScheduler()
+  setTimeout(() => { void reconcileCertificateDeployments() }, 10_000).unref()
 })
 

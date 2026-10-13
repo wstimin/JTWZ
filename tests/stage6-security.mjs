@@ -135,6 +135,11 @@ try {
   assert.match(updateDispatcher, /apply\.request/)
   assert.match(installer, /jtwz-update\.path/)
   assert.match(domainExecutor, /certbot --nginx --non-interactive/)
+  assert.match(domainExecutor, /certificate_available/)
+  assert.match(domainExecutor, /listen 443 ssl/)
+  assert.match(domainExecutor, /Certbot 返回成功，但未找到/)
+  assert.match(domainDispatcher, /route\|ensure\|check\|remove\|purge/)
+  assert.match(readFileSync(resolve(root, 'server/index.ts'), 'utf8'), /provider === 'certbot'[\s\S]*otherLive/)
   assert.match(domainDispatcher, /domain-jobs/)
   assert.match(installer, /jtwz-domain\.path/)
 
