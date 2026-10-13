@@ -37,7 +37,7 @@ https://api.example.com       API 与运行时域名入口
 一键入口支持远程一行命令：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/wstimin/JTWZ/main/deploy/one-click/install.sh)
+bash <(curl -fsSL -H 'Accept: application/vnd.github.raw' 'https://api.github.com/repos/wstimin/JTWZ/contents/deploy/one-click/install.sh?ref=main')
 ```
 
 也可以下载 `jtwz-one-click-vX.Y.Z.tar.gz` 后执行 `sudo ./install.sh`。安装器会从多个外部服务自动识别公网 IP，显示结果并允许改填公网域名；识别失败才要求手动输入。它拒绝回环、私网、链路本地和 CGNAT 地址。安装完成后使用 `sudo jt` 调出交互菜单。

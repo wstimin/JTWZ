@@ -5,7 +5,7 @@
 ## 直接一行命令
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/wstimin/JTWZ/main/deploy/one-click/install.sh)
+bash <(curl -fsSL -H 'Accept: application/vnd.github.raw' 'https://api.github.com/repos/wstimin/JTWZ/contents/deploy/one-click/install.sh?ref=main')
 ```
 
 ## 使用 Release 压缩包

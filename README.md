@@ -13,7 +13,7 @@ JTWZ 是一个面向生产环境的综合平台，用于管理多域名跳转、
 一键脚本是首选入口，支持下载发行包后执行，也支持服务器直接运行一行命令：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/wstimin/JTWZ/main/deploy/one-click/install.sh)
+bash <(curl -fsSL -H 'Accept: application/vnd.github.raw' 'https://api.github.com/repos/wstimin/JTWZ/contents/deploy/one-click/install.sh?ref=main')
 ```
 
 脚本会自动识别服务器公网 IPv4（失败时再提示手动输入公网 IP 或域名），生成生产配置并安装服务。它不会把 `127.0.0.1`、`192.168.x.x`、`10.x.x.x` 等内网地址作为访问地址。安装完成后使用：
