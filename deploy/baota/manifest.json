@@ -1,7 +1,7 @@
 {
   "id": "jtwz",
   "name": "JTWZ 综合域名管理平台",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "type": "baota-app",
   "entrypoint": "install.sh",
   "description": "解压后运行 install.sh，进入域名、管理员和服务安装向导。"
