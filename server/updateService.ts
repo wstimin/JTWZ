@@ -89,7 +89,9 @@ export async function checkForUpdate() {
     }
   }
   if (!/^https:\/\//i.test(config.updateManifestUrl)) throw new Error('更新清单地址必须使用 HTTPS')
-  const response = await fetch(config.updateManifestUrl, { headers: { Accept: 'application/json', 'User-Agent': `JTWZ/${config.systemVersion}` }, signal: AbortSignal.timeout(15_000) })
+  const manifestUrl = new URL(config.updateManifestUrl)
+  manifestUrl.searchParams.set('_jtwz_check', String(Date.now()))
+  const response = await fetch(manifestUrl, { cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache', 'User-Agent': `JTWZ/${config.systemVersion}` }, signal: AbortSignal.timeout(15_000) })
   if (!response.ok) throw new Error(`更新清单请求失败（${response.status}）`)
   const manifest = validateManifest(await response.json())
   const status = {
