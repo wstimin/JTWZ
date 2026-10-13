@@ -6,18 +6,33 @@ ENV_FILE="$APP_DIR/data/config.env"
 [[ -f "$ENV_FILE" ]] || ENV_FILE="$APP_DIR/.env"
 SERVICE_NAME="jtwz"
 API_URL="${JTWZ_API_URL:-}"
-COOKIE_FILE="${TMPDIR:-/tmp}/jtwzctl-$$.cookie"
-trap 'rm -f "$COOKIE_FILE"' EXIT
+LOCAL_CONTROL_TOKEN=''
 
 say() { printf '\n[JTWZ] %s\n' "$*"; }
 die() { printf '[JTWZ][错误] %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || die "缺少命令：$1"; }
 need curl
 
-LOGIN_ERROR=''
 API_ERROR=''
 
 env_value() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tail -n 1; }
+set_env_value() {
+  local key="$1" value="$2"
+  python3 - "$ENV_FILE" "$key" "$value" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1]); key = sys.argv[2]; value = sys.argv[3]
+lines = p.read_text().splitlines() if p.exists() else []
+out = []; found = False
+for line in lines:
+    if line.startswith(key + '='):
+        out.append(key + '=' + value); found = True
+    else:
+        out.append(line)
+if not found: out.append(key + '=' + value)
+p.write_text('\n'.join(out) + '\n')
+PY
+}
 [[ -n "$API_URL" ]] || API_URL="http://127.0.0.1:$(env_value API_PORT)"
 [[ "$API_URL" != 'http://127.0.0.1:' ]] || API_URL='http://127.0.0.1:8787'
 restart_service() { if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then systemctl restart "$SERVICE_NAME"; elif command -v docker >/dev/null && [[ -f "$APP_DIR/docker-compose.yml" ]]; then (cd "$APP_DIR" && docker compose restart); fi; }
@@ -38,23 +53,62 @@ access_urls() {
   printf '公开首页：%s/\n管理登录：%s\n' "${public_url%/}" "$admin_url"
 }
 
+panel_domain_update() {
+  [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
+  local domain current path scheme origin executor
+  current="$(env_value ADMIN_DOMAIN)"; current="${current:-$(env_value ADMIN_ADDRESS)}"
+  read -r -p "面板访问域名${current:+ [$current]}: " domain; domain="${domain:-$current}"
+  domain="${domain#http://}"; domain="${domain#https://}"; domain="${domain%%/*}"; domain="${domain,,}"
+  [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || die '请输入有效的面板域名，不能填写 IP 或包含路径。'
+  executor="${JTWZ_DOMAIN_EXECUTOR:-/usr/local/bin/jtwz-domain}"
+  [[ -x "$executor" ]] || die '未找到本机域名执行器，请重新运行一键安装脚本完成升级。'
+  "$executor" route "$domain"
+  scheme='http'; [[ -r "/etc/letsencrypt/live/$domain/fullchain.pem" ]] && scheme='https'
+  origin="$scheme://$domain"
+  path="$(env_value ADMIN_BASE_PATH)"; path="${path:-/admin}"; path="/${path#/}"; path="${path%/}"
+  set_env_value ADMIN_ADDRESS "$domain"
+  set_env_value ADMIN_DOMAIN "$domain"
+  set_env_value ADMIN_APP_ORIGIN "$origin"
+  set_env_value ADMIN_LOGIN_URL "$origin$path/login"
+  if id -u jtwz >/dev/null 2>&1; then chown root:jtwz "$ENV_FILE"; chmod 640 "$ENV_FILE"; else chmod 600 "$ENV_FILE"; fi
+  restart_service
+  say "面板域名已配置：$origin$path/login"
+  say '请确认该域名的 A/AAAA 记录已经指向当前服务器；需要 HTTPS 时继续选择“申请面板 HTTPS 证书”。'
+}
+
+panel_https_enable() {
+  [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
+  local domain requested_domain email path origin executor
+  domain="$(env_value ADMIN_DOMAIN)"; domain="${domain:-$(env_value ADMIN_ADDRESS)}"
+  read -r -p "申请证书的面板域名${domain:+ [$domain]}: " requested_domain; domain="${requested_domain:-$domain}"
+  domain="${domain#http://}"; domain="${domain#https://}"; domain="${domain%%/*}"; domain="${domain,,}"
+  [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || die '请先配置有效的面板域名。'
+  read -r -p '证书通知邮箱（可留空）: ' email
+  executor="${JTWZ_DOMAIN_EXECUTOR:-/usr/local/bin/jtwz-domain}"
+  [[ -x "$executor" ]] || die '未找到本机域名执行器，请重新运行一键安装脚本完成升级。'
+  JTWZ_CERTBOT_EMAIL="$email" "$executor" ensure "$domain"
+  origin="https://$domain"
+  path="$(env_value ADMIN_BASE_PATH)"; path="${path:-/admin}"; path="/${path#/}"; path="${path%/}"
+  set_env_value ADMIN_ADDRESS "$domain"
+  set_env_value ADMIN_DOMAIN "$domain"
+  set_env_value ADMIN_APP_ORIGIN "$origin"
+  set_env_value ADMIN_LOGIN_URL "$origin$path/login"
+  if id -u jtwz >/dev/null 2>&1; then chown root:jtwz "$ENV_FILE"; chmod 640 "$ENV_FILE"; else chmod 600 "$ENV_FILE"; fi
+  restart_service
+  say "面板 HTTPS 已启用：$origin$path/login"
+}
+
 admin_path_update() {
   [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
-  local next_path="${1:-}" current_path username password response
+  local next_path="${1:-}" current_path response
   current_path="$(env_value ADMIN_BASE_PATH)"; current_path="${current_path:-/admin}"
   if [[ -z "$next_path" ]]; then read -r -p "新的管理入口后缀 [$current_path]: " next_path; next_path="${next_path:-$current_path}"; fi
   next_path="/${next_path#/}"; next_path="${next_path%/}"; next_path="${next_path,,}"
   [[ "$next_path" =~ ^/[a-z0-9][a-z0-9_-]{3,63}$ ]] || die '管理入口后缀需为 4-64 位字母、数字、短横线或下划线。'
   case "$next_path" in /api|/assets|/admin-assets|/downloads|/preview|/login) die '该管理入口后缀属于系统保留路径。' ;; esac
-  username="$(env_value ADMIN_USERNAME)"; password="$(env_value ADMIN_PASSWORD)"
-  if [[ -z "$username" || -z "$password" ]]; then
-    read -r -p '管理员账号: ' username
-    read -r -s -p '当前管理员密码: ' password; printf '\n' >&2
-  fi
-  if ! api_login_with "$username" "$password"; then die "API 登录失败：${LOGIN_ERROR:-未知错误}"; fi
-  response="$(curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/json' -X PUT -d "$(python3 - "$password" "$next_path" <<'PY'
+  response="$(local_api_curl -fsS -H 'Content-Type: application/json' -X PUT -d "$(python3 - "$next_path" <<'PY'
 import json, sys
-print(json.dumps({'currentPassword': sys.argv[1], 'adminBasePath': sys.argv[2]}))
+print(json.dumps({'adminBasePath': sys.argv[1]}))
 PY
 )" "$API_URL/api/admin/access")" || die '管理入口修改失败。'
   printf '%s' "$response" | pretty_json
@@ -62,72 +116,21 @@ PY
   access_urls
 }
 
-api_login() {
+local_control_token() {
   [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
-  local username password
-  username="$(env_value ADMIN_USERNAME)"; password="$(env_value ADMIN_PASSWORD)"
-  if [[ -z "$username" || -z "$password" ]]; then
-    read -r -p '管理员账号: ' username
-    read -r -s -p '管理员密码: ' password; printf '\n' >&2
-  fi
-  if api_login_with "$username" "$password"; then return 0; fi
-  say "保存的管理员凭据登录失败：${LOGIN_ERROR:-未知错误}"
-  read -r -p "管理员账号 [$username]: " retry_username; retry_username="${retry_username:-$username}"
-  read -r -s -p '管理员密码: ' retry_password; printf '\n' >&2
-  if ! api_login_with "$retry_username" "$retry_password"; then
-    die "API 登录失败：${LOGIN_ERROR:-未知错误}"
-  fi
+  local secret
+  secret="$(env_value APP_SECRET)"
+  [[ -n "$secret" ]] || die '本机控制凭据缺失，请检查 APP_SECRET 配置。'
+  printf 'jtwz-local-control-v1:%s' "$secret" | sha256sum | awk '{print $1}'
 }
 
-api_login_with() {
-  local username="$1" password="$2" response status body challenge code
-  LOGIN_ERROR=''
-  if response="$(curl -sS -w $'\n%{http_code}' -c "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$username" "$password" <<'PY'
-import json, sys
-print(json.dumps({'username': sys.argv[1], 'password': sys.argv[2]}))
-PY
- )" "$API_URL/api/auth/login" 2>&1)"; then
-    status="${response##*$'\n'}"
-    body="${response%$'\n'*}"
-  else
-    LOGIN_ERROR='无法连接 API，请确认服务正在运行。'
-    return 2
-  fi
-  if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
-    LOGIN_ERROR="$(printf '%s' "$body" | python3 -c 'import json,sys
-try:
- print(json.load(sys.stdin).get("error", "API 登录失败"))
-except Exception:
- print("API 登录失败（HTTP " + sys.argv[1] + "）")' "$status" 2>/dev/null)"
-    [[ -n "$LOGIN_ERROR" ]] || LOGIN_ERROR="API 登录失败（HTTP $status）。"
-    return 1
-  fi
-  if printf '%s' "$body" | grep -q '"requiresTwoFactor":true'; then
-    challenge="$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("challengeId", ""))')"
-    if [[ -z "$challenge" ]]; then LOGIN_ERROR='服务器要求双重验证，但未返回验证挑战。'; return 1; fi
-    read -r -p '动态验证码或恢复码: ' code
-    if ! response="$(curl -sS -w $'\n%{http_code}' -b "$COOKIE_FILE" -c "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$challenge" "$code" <<'PY'
-import json, sys
-print(json.dumps({'challengeId': sys.argv[1], 'code': sys.argv[2]}))
-PY
- )" "$API_URL/api/auth/two-factor" 2>&1)"; then
-      LOGIN_ERROR='无法连接 API，双重验证未完成。'
-      return 2
-    fi
-    status="${response##*$'\n'}"
-    body="${response%$'\n'*}"
-    if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
-      LOGIN_ERROR="$(printf '%s' "$body" | python3 -c 'import json,sys
-try:
- print(json.load(sys.stdin).get("error", "双重验证失败"))
-except Exception:
- print("双重验证失败（HTTP " + sys.argv[1] + "）")' "$status" 2>/dev/null)"
-      [[ -n "$LOGIN_ERROR" ]] || LOGIN_ERROR="双重验证失败（HTTP $status）。"
-      return 1
-    fi
-  fi
-  printf '%s' "$body" | grep -q '"username"' || { LOGIN_ERROR='API 登录未返回有效会话。'; return 1; }
-  return 0
+ensure_local_control() {
+  [[ -n "$LOCAL_CONTROL_TOKEN" ]] || LOCAL_CONTROL_TOKEN="$(local_control_token)"
+}
+
+local_api_curl() {
+  ensure_local_control
+  curl -H "X-JTWZ-Local-Control-Token: $LOCAL_CONTROL_TOKEN" "$@"
 }
 
 pretty_json() { if command -v python3 >/dev/null; then python3 -m json.tool; else cat; fi; }
@@ -156,23 +159,15 @@ except Exception:
   return 0
 }
 
-local_update_token() {
-  local secret
-  secret="$(env_value APP_SECRET)"
-  [[ -n "$secret" ]] || die '本机更新凭据缺失，请检查 APP_SECRET 配置。'
-  printf 'jtwz-local-update-v1:%s' "$secret" | sha256sum | awk '{print $1}'
-}
-
-domain_list() { api_login; curl -fsS -b "$COOKIE_FILE" "$API_URL/api/domains" | pretty_json; }
+domain_list() { local_api_curl -fsS "$API_URL/api/domains" | pretty_json; }
 
 domain_add() {
-  api_login
   local hostname mode target code
   read -r -p '来源域名: ' hostname
   read -r -p '模式（redirect/site/download/maintenance）[redirect]: ' mode; mode="${mode:-redirect}"
   read -r -p '目标地址或内容（可留空）: ' target
   read -r -p '跳转码（301/302）[302]: ' code; code="${code:-302}"
-  curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$hostname" "$mode" "$target" "$code" <<'PY'
+  local_api_curl -fsS -H 'Content-Type: application/json' -d "$(python3 - "$hostname" "$mode" "$target" "$code" <<'PY'
 import json, sys
 print(json.dumps({'hostname': sys.argv[1], 'mode': sys.argv[2], 'target': sys.argv[3], 'redirectCode': int(sys.argv[4]), 'preservePath': True, 'preserveQuery': True, 'forceHttps': True}))
 PY
@@ -180,14 +175,13 @@ PY
 }
 
 domain_update() {
-  api_login
   local id mode target status code
   read -r -p '域名 ID: ' id
   read -r -p '模式（留空保持不变）: ' mode
   read -r -p '目标地址或内容（留空保持不变）: ' target
   read -r -p '状态（active/pending/paused/error，留空保持不变）: ' status
   read -r -p '跳转码（301/302，留空保持不变）: ' code
-  curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$mode" "$target" "$status" "$code" <<'PY'
+  local_api_curl -fsS -H 'Content-Type: application/json' -d "$(python3 - "$mode" "$target" "$status" "$code" <<'PY'
 import json, sys
 body = {}
 if sys.argv[1]: body['mode'] = sys.argv[1]
@@ -200,12 +194,11 @@ PY
 }
 
 domain_delete() {
-  api_login
   local id confirm
   read -r -p '域名 ID: ' id
   read -r -p "确认删除域名 $id？输入 DELETE: " confirm
   [[ "$confirm" == DELETE ]] || die '已取消。'
-  curl -fsS -b "$COOKIE_FILE" -X DELETE "$API_URL/api/domains/$id" | pretty_json
+  local_api_curl -fsS -X DELETE "$API_URL/api/domains/$id" | pretty_json
 }
 
 ssl_list() {
@@ -275,8 +268,8 @@ PY
   say '配置已保存并重启服务。'
 }
 
-backup_create() { api_login; curl -fsS -b "$COOKIE_FILE" -X POST "$API_URL/api/admin/backups/create" | pretty_json; }
-backup_list() { api_login; curl -fsS -b "$COOKIE_FILE" "$API_URL/api/admin/backups" | pretty_json; }
+backup_create() { local_api_curl -fsS -X POST "$API_URL/api/admin/backups/create" | pretty_json; }
+backup_list() { local_api_curl -fsS "$API_URL/api/admin/backups" | pretty_json; }
 
 backup_restore() {
   local archive="${1:-}" confirm response
@@ -284,8 +277,7 @@ backup_restore() {
   [[ -f "$archive" ]] || die "备份文件不存在：$archive"
   read -r -p '恢复会替换网站数据和运行配置，系统会自动创建回滚备份。输入 RESTORE 继续: ' confirm
   [[ "$confirm" == RESTORE ]] || die '已取消恢复。'
-  api_login
-  response="$(curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/octet-stream' --data-binary "@$archive" "$API_URL/api/admin/import")" || die '恢复失败；服务端会自动尝试回滚，请查看服务日志。'
+  response="$(local_api_curl -fsS -H 'Content-Type: application/octet-stream' --data-binary "@$archive" "$API_URL/api/admin/import")" || die '恢复失败；服务端会自动尝试回滚，请查看服务日志。'
   printf '%s' "$response" | pretty_json
   say '完整备份已恢复，正在重启服务使运行配置完全生效。'
   restart_service
@@ -294,9 +286,9 @@ backup_restore() {
 
 system_update_safe() {
   local status_json confirm response configured available current latest notes update_token
-  update_token="$(local_update_token)"
+  update_token="$(local_control_token)"
   say '正在检查带 Ed25519 签名的正式更新清单...'
-  if ! api_call -H "X-JTWZ-Local-Update-Token: $update_token" -X POST "$API_URL/api/admin/system/update/check"; then
+  if ! api_call -H "X-JTWZ-Local-Control-Token: $update_token" -X POST "$API_URL/api/admin/system/update/check"; then
     die "版本检测失败：${API_ERROR:-未知错误}"
   fi
   status_json="$API_BODY"
@@ -313,7 +305,7 @@ system_update_safe() {
   [[ "$available" == true ]] || { say '当前已经是最新版本。'; return 0; }
   read -r -p '系统将先创建完整备份，再校验更新包并执行健康检查。输入 UPDATE 继续: ' confirm
   [[ "$confirm" == UPDATE ]] || die '已取消更新。'
-  if ! api_call -H "X-JTWZ-Local-Update-Token: $update_token" -X POST "$API_URL/api/admin/system/update/install"; then
+  if ! api_call -H "X-JTWZ-Local-Control-Token: $update_token" -X POST "$API_URL/api/admin/system/update/install"; then
     die "更新启动失败：${API_ERROR:-未知错误}"
   fi
   response="$API_BODY"
@@ -327,20 +319,15 @@ system_update_safe() {
 
 account_update() {
   [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
-  local current_username current_password new_username new_password value
+  local current_username new_username new_password
   current_username="$(env_value ADMIN_USERNAME)"
-  current_password="$(env_value ADMIN_PASSWORD)"
-  if [[ -z "$current_username" || -z "$current_password" ]]; then
-    read -r -p '当前管理员账号: ' current_username
-    read -r -s -p '当前管理员密码: ' current_password; printf '\n' >&2
-  fi
+  current_username="${current_username:-admin}"
   read -r -p "新管理员账号 [$current_username]: " new_username; new_username="${new_username:-$current_username}"
   read -r -s -p '新管理员密码（至少 6 位）: ' new_password; printf '\n' >&2
   [[ "${#new_password}" -ge 6 ]] || die '管理员密码至少需要 6 位。'
-  if ! api_login_with "$current_username" "$current_password"; then die "API 登录失败：${LOGIN_ERROR:-未知错误}"; fi
-  curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/json' -X PUT -d "$(python3 - "$current_password" "$new_password" "$new_username" <<'PY'
+  local_api_curl -fsS -H 'Content-Type: application/json' -X PUT -d "$(python3 - "$new_password" "$new_username" <<'PY'
 import json, sys
-print(json.dumps({'currentPassword': sys.argv[1], 'newPassword': sys.argv[2], 'newUsername': sys.argv[3]}))
+print(json.dumps({'newPassword': sys.argv[1], 'newUsername': sys.argv[2]}))
 PY
 )" "$API_URL/api/admin/account" | pretty_json
   python3 - "$ENV_FILE" "$new_username" "$new_password" <<'PY'
@@ -476,15 +463,19 @@ admin_account_menu() {
 
 [管理后台与账号]
   1) 查看当前访问地址
-  2) 修改管理后台入口
-  3) 修改管理员账号密码
+  2) 配置面板访问域名
+  3) 申请或重新部署面板 HTTPS 证书
+  4) 修改管理后台入口路径
+  5) 修改管理员账号密码
   0) 返回主菜单
 EOF
     local choice; read -r -p '请输入编号: ' choice
     case "$choice" in
       1) run_menu_action access_urls ;;
-      2) run_menu_action admin_path_update ;;
-      3) run_menu_action account_update ;;
+      2) run_menu_action panel_domain_update ;;
+      3) run_menu_action panel_https_enable ;;
+      4) run_menu_action admin_path_update ;;
+      5) run_menu_action account_update ;;
       0) return ;;
       *) say '无效选项。' ;;
     esac
@@ -607,6 +598,8 @@ case "${1:-menu}" in
   menu) menu ;;
   status|info) status ;;
   access|urls) access_urls ;;
+  panel-domain) panel_domain_update ;;
+  panel-https) panel_https_enable ;;
   admin-path) case "${2:-show}" in show) access_urls ;; set|update) admin_path_update "${3:-}" ;; *) die '用法：jtwzctl admin-path {show|set [后缀]}' ;; esac ;;
   domain) case "${2:-list}" in list) domain_list ;; add) domain_add ;; update|edit) domain_update ;; delete|remove) domain_delete ;; *) die '用法：jtwzctl domain {list|add|update|delete}' ;; esac ;;
   ssl) case "${2:-list}" in list) ssl_list ;; add) ssl_add ;; update|edit) ssl_update ;; delete|remove) ssl_delete ;; renew) ssl_renew ;; *) die '用法：jtwzctl ssl {list|add|update|delete|renew}' ;; esac ;;
@@ -617,5 +610,5 @@ case "${1:-menu}" in
   uninstall) uninstall ;;
   restart) restart_service ;;
   logs) service_logs ;;
-  *) die '用法：jtwzctl {menu|status|logs|access|admin-path|domain|ssl|config|account|backup|update|uninstall|restart}' ;;
+  *) die '用法：jtwzctl {menu|status|logs|access|panel-domain|panel-https|admin-path|domain|ssl|config|account|backup|update|uninstall|restart}' ;;
 esac

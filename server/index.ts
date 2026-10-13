@@ -22,8 +22,9 @@ import { getAuthenticatedAdmin } from './services/authService.js'
 import { handleAuthRoutes } from './routes/authRoutes.js'
 import { handleSecurityRoutes } from './routes/securityRoutes.js'
 import { permissionForRequest, requirePermission } from './middleware/authorization.js'
-import type { AuthenticatedRequest } from './securityTypes.js'
+import { permissionsForRole, type AuthenticatedAdmin, type AuthenticatedRequest } from './securityTypes.js'
 import { validatePackageFile, validatePackageMetadata } from './services/uploadValidation.js'
+import { hasLocalControlAccess, hasLocalUpdateAccess } from './localControl.js'
 
 type Row = Record<string, unknown>
 
@@ -60,17 +61,6 @@ function adminAccess(request: IncomingMessage) {
     loginPath: `${activeAdminBasePath}/login`,
     loginUrl: `${origin}${activeAdminBasePath}/login`,
   }
-}
-
-function hasLocalUpdateAccess(request: IncomingMessage) {
-  const remoteAddress = request.socket.remoteAddress || ''
-  const loopback = remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress.startsWith('::ffff:127.')
-  if (!loopback) return false
-  const supplied = String(request.headers['x-jtwz-local-update-token'] || '')
-  const expected = createHash('sha256').update(`jtwz-local-update-v1:${config.appSecret}`).digest('hex')
-  const suppliedBuffer = Buffer.from(supplied)
-  const expectedBuffer = Buffer.from(expected)
-  return suppliedBuffer.length === expectedBuffer.length && timingSafeEqual(suppliedBuffer, expectedBuffer)
 }
 
 function writeEnvironmentValues(values: Record<string, string>) {
@@ -136,6 +126,30 @@ function requireAdmin(request: AuthenticatedRequest) {
   if (!admin) throw new HttpError(401, '请先登录管理后台')
   request.admin = admin
   return admin
+}
+
+function localControlAdmin(): AuthenticatedAdmin {
+  const row = db.prepare("SELECT id, username, display_name, totp_secret FROM admins WHERE status = 'active' ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, created_at ASC LIMIT 1").get() as Row | undefined
+  if (!row) throw new HttpError(503, '系统没有可用的管理员账号')
+  return {
+    id: String(row.id),
+    username: String(row.username),
+    displayName: String(row.display_name || row.username),
+    role: 'owner',
+    permissions: permissionsForRole('owner'),
+    twoFactorEnabled: Boolean(row.totp_secret),
+    sessionId: 'local-control',
+    csrfToken: '',
+  }
+}
+
+function localControlPath(pathname: string) {
+  return pathname === '/api/admin/account'
+    || pathname === '/api/admin/access'
+    || pathname === '/api/admin/import'
+    || pathname.startsWith('/api/admin/backups')
+    || pathname === '/api/domains'
+    || pathname.startsWith('/api/domains/')
 }
 
 function enforceAdminRateLimit(request: AuthenticatedRequest, adminId: string) {
@@ -738,9 +752,13 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     return
   }
 
-  const admin = requireAdmin(request)
-  enforceAdminRateLimit(request, admin.id)
-  requireCsrf(request, admin.csrfToken)
+  const localControl = localControlPath(url.pathname) && hasLocalControlAccess(request)
+  const admin = localControl ? localControlAdmin() : requireAdmin(request)
+  request.admin = admin
+  if (!localControl) {
+    enforceAdminRateLimit(request, admin.id)
+    requireCsrf(request, admin.csrfToken)
+  }
   if (await handleSecurityRoutes(request, response, url)) return
   requirePermission(admin, permissionForRequest(method, url.pathname))
 
@@ -750,7 +768,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const newPassword = String(body.newPassword || '')
     const newUsername = String(body.newUsername || admin.username).trim()
     const row = db.prepare('SELECT password_hash FROM admins WHERE id = ?').get(admin.id) as Row | undefined
-    if (!row || !verifyPassword(currentPassword, String(row.password_hash))) throw new HttpError(400, '当前密码不正确')
+    if (!row || (!localControl && !verifyPassword(currentPassword, String(row.password_hash)))) throw new HttpError(400, '当前密码不正确')
     if (!/^[A-Za-z0-9._-]{3,64}$/.test(newUsername)) throw new HttpError(400, '管理员账号需为 3-64 位字母、数字、点、下划线或短横线')
     if (newPassword.length < 6 || newPassword.length > 160) throw new HttpError(400, '新密码长度需要在 6 到 160 个字符之间')
     const conflict = db.prepare('SELECT id FROM admins WHERE username = ? AND id <> ?').get(newUsername, admin.id)
@@ -771,7 +789,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
   if (method === 'PUT' && url.pathname === '/api/admin/access') {
     const body = await readJson<{ currentPassword?: string; adminBasePath?: string }>(request)
     const row = db.prepare('SELECT password_hash FROM admins WHERE id = ?').get(admin.id) as Row | undefined
-    if (!row || !verifyPassword(String(body.currentPassword || ''), String(row.password_hash))) throw new HttpError(400, '当前密码不正确')
+    if (!row || (!localControl && !verifyPassword(String(body.currentPassword || ''), String(row.password_hash)))) throw new HttpError(400, '当前密码不正确')
     let nextPath: string
     try {
       nextPath = normalizeAdminBasePath(body.adminBasePath)
