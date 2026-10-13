@@ -111,7 +111,7 @@ import json, sys
 print(json.dumps({'adminBasePath': sys.argv[1]}))
 PY
 )" "$API_URL/api/admin/access")" || die '管理入口修改失败。'
-  printf '%s' "$response" | pretty_json
+  [[ -n "$response" ]] || die '管理入口修改失败：服务端没有返回结果。'
   say '新的访问地址'
   access_urls
 }
@@ -133,7 +133,55 @@ local_api_curl() {
   curl -H "X-JTWZ-Local-Control-Token: $LOCAL_CONTROL_TOKEN" "$@"
 }
 
-pretty_json() { if command -v python3 >/dev/null; then python3 -m json.tool; else cat; fi; }
+format_domain_list() {
+  python3 -c 'import json, sys
+data = json.load(sys.stdin)
+items = data.get("domains", [])
+modes = {"redirect": "跳转", "site": "网站", "download": "下载", "maintenance": "维护"}
+statuses = {"active": "正常", "pending": "待配置", "paused": "已暂停", "error": "异常"}
+certs = {"active": "HTTPS 已生效", "expiring": "HTTPS 将到期", "error": "HTTPS 异常"}
+print(f"域名：{len(items)} 个")
+if not items:
+    print("暂无域名。")
+for index, item in enumerate(items, 1):
+    mode = modes.get(item.get("mode"), item.get("mode") or "未知模式")
+    status = statuses.get(item.get("status"), item.get("status") or "未知状态")
+    cert = certs.get(item.get("certificateStatus"), "未启用 HTTPS")
+    print("{}) {} · {} · {} · {}".format(index, item.get("hostname", "-"), mode, status, cert))
+    if item.get("target"):
+        print("   目标：{}".format(item.get("target")))
+    print("   ID：{}".format(item.get("id", "-")))'
+}
+
+format_domain_result() {
+  python3 -c 'import json, sys
+data = json.load(sys.stdin)
+item = data.get("domain", data)
+hostname = item.get("hostname") if isinstance(item, dict) else None
+print(f"域名已保存：{hostname}" if hostname else "域名操作已完成。")'
+}
+
+format_backup_list() {
+  python3 -c 'import json, sys
+data = json.load(sys.stdin)
+items = data.get("backups", [])
+print(f"备份：{len(items)} 个")
+if not items:
+    print("暂无备份。")
+for index, item in enumerate(items, 1):
+    size = float(item.get("byteSize", 0)) / 1024 / 1024
+    created = str(item.get("createdAt", "-")).replace("T", " ")[:19]
+    print("{}) {} · {:.1f} MB · {}".format(index, item.get("fileName", "-"), size, created))'
+}
+
+format_backup_result() {
+  python3 -c 'import json, sys
+data = json.load(sys.stdin)
+item = data.get("backup", data)
+name = item.get("fileName") if isinstance(item, dict) else None
+size = float(item.get("byteSize", 0)) / 1024 / 1024 if isinstance(item, dict) else 0
+print(f"备份已创建：{name}（{size:.1f} MB）" if name else "备份已创建。")'
+}
 
 api_call() {
   local raw status body
@@ -159,7 +207,7 @@ except Exception:
   return 0
 }
 
-domain_list() { local_api_curl -fsS "$API_URL/api/domains" | pretty_json; }
+domain_list() { local_api_curl -fsS "$API_URL/api/domains" | format_domain_list; }
 
 domain_add() {
   local hostname mode target code
@@ -171,7 +219,7 @@ domain_add() {
 import json, sys
 print(json.dumps({'hostname': sys.argv[1], 'mode': sys.argv[2], 'target': sys.argv[3], 'redirectCode': int(sys.argv[4]), 'preservePath': True, 'preserveQuery': True, 'forceHttps': True}))
 PY
-)" "$API_URL/api/domains" | pretty_json
+)" "$API_URL/api/domains" | format_domain_result
 }
 
 domain_update() {
@@ -190,7 +238,7 @@ if sys.argv[3]: body['status'] = sys.argv[3]
 if sys.argv[4]: body['redirectCode'] = int(sys.argv[4])
 print(json.dumps(body))
 PY
-)" -X PUT "$API_URL/api/domains/$id" | pretty_json
+)" -X PUT "$API_URL/api/domains/$id" | format_domain_result
 }
 
 domain_delete() {
@@ -198,12 +246,26 @@ domain_delete() {
   read -r -p '域名 ID: ' id
   read -r -p "确认删除域名 $id？输入 DELETE: " confirm
   [[ "$confirm" == DELETE ]] || die '已取消。'
-  local_api_curl -fsS -X DELETE "$API_URL/api/domains/$id" | pretty_json
+  local_api_curl -fsS -X DELETE "$API_URL/api/domains/$id" >/dev/null
+  say '域名已删除。'
 }
 
 ssl_list() {
-  if command -v certbot >/dev/null; then certbot certificates || true; else say '未安装 certbot。'; fi
-  if [[ -d /etc/letsencrypt/live ]]; then find /etc/letsencrypt/live -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort; fi
+  local cert domain expiry found=false
+  say 'HTTPS 证书'
+  if [[ ! -d /etc/letsencrypt/live ]]; then say '暂无证书。'; return 0; fi
+  for cert in /etc/letsencrypt/live/*/fullchain.pem; do
+    [[ -r "$cert" ]] || continue
+    found=true
+    domain="$(basename "$(dirname "$cert")")"
+    if command -v openssl >/dev/null; then
+      expiry="$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2-)"
+    else
+      expiry='未知'
+    fi
+    printf '%s · 到期：%s\n' "$domain" "${expiry:-未知}"
+  done
+  [[ "$found" == true ]] || say '暂无证书。'
 }
 
 ssl_add() {
@@ -268,8 +330,8 @@ PY
   say '配置已保存并重启服务。'
 }
 
-backup_create() { local_api_curl -fsS -X POST "$API_URL/api/admin/backups/create" | pretty_json; }
-backup_list() { local_api_curl -fsS "$API_URL/api/admin/backups" | pretty_json; }
+backup_create() { local_api_curl -fsS -X POST "$API_URL/api/admin/backups/create" | format_backup_result; }
+backup_list() { local_api_curl -fsS "$API_URL/api/admin/backups" | format_backup_list; }
 
 backup_restore() {
   local archive="${1:-}" confirm response
@@ -278,7 +340,7 @@ backup_restore() {
   read -r -p '恢复会替换网站数据和运行配置，系统会自动创建回滚备份。输入 RESTORE 继续: ' confirm
   [[ "$confirm" == RESTORE ]] || die '已取消恢复。'
   response="$(local_api_curl -fsS -H 'Content-Type: application/octet-stream' --data-binary "@$archive" "$API_URL/api/admin/import")" || die '恢复失败；服务端会自动尝试回滚，请查看服务日志。'
-  printf '%s' "$response" | pretty_json
+  [[ -n "$response" ]] || die '恢复失败：服务端没有返回结果。'
   say '完整备份已恢复，正在重启服务使运行配置完全生效。'
   restart_service
   status
@@ -292,7 +354,6 @@ system_update_safe() {
     die "版本检测失败：${API_ERROR:-未知错误}"
   fi
   status_json="$API_BODY"
-  printf '%s' "$status_json" | pretty_json
   configured="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("update", {}).get("configured", False)).lower())')"
   [[ "$configured" == true ]] || die "更新源未配置：$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("update", {}).get("configurationError", "请配置更新清单地址和签名公钥"))')"
   current="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("update", {}).get("currentVersion", "未知"))')"
@@ -309,7 +370,6 @@ system_update_safe() {
     die "更新启动失败：${API_ERROR:-未知错误}"
   fi
   response="$API_BODY"
-  printf '%s' "$response" | pretty_json
   if printf '%s' "$response" | grep -q '"applyStarted":true'; then
     say '更新执行器已接管；失败时会自动恢复上一版程序。稍后运行 jt status 查看结果。'
   else
@@ -329,7 +389,7 @@ account_update() {
 import json, sys
 print(json.dumps({'newPassword': sys.argv[1], 'newUsername': sys.argv[2]}))
 PY
-)" "$API_URL/api/admin/account" | pretty_json
+)" "$API_URL/api/admin/account" >/dev/null
   python3 - "$ENV_FILE" "$new_username" "$new_password" <<'PY'
 from pathlib import Path
 import sys
@@ -378,21 +438,54 @@ uninstall() {
 }
 
 status() {
-  say '系统信息'; uname -a; printf 'Node: '; node --version 2>/dev/null || printf '未安装\n'; printf '磁盘: '; df -h "$APP_DIR" | tail -n 1
-  if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then systemctl --no-pager --full status "$SERVICE_NAME" || true; elif command -v docker >/dev/null && [[ -f "$APP_DIR/docker-compose.yml" ]]; then (cd "$APP_DIR" && docker compose ps); fi
-  curl -fsS "$API_URL/api/health" 2>/dev/null | pretty_json || say 'API 暂不可用。'
+  local version node_version disk service_state api_state
+  version="$(python3 - "$APP_DIR/package.json" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get("version", "未知"))
+except Exception:
+    print("未知")
+PY
+)"
+  node_version="$(node --version 2>/dev/null || true)"; node_version="${node_version:-未安装}"
+  disk="$(df -hP "$APP_DIR" 2>/dev/null | awk 'NR==2 {print $3 "/" $2 "（" $5 "）"}')"; disk="${disk:-未知}"
+  service_state='未运行'
+  if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
+    systemctl is-active --quiet "$SERVICE_NAME" && service_state='运行中'
+  elif command -v docker >/dev/null && [[ -f "$APP_DIR/docker-compose.yml" ]]; then
+    if (cd "$APP_DIR" && docker compose ps --status running -q 2>/dev/null | grep -q .); then service_state='运行中'; fi
+  fi
+  api_state='异常'
+  curl -fsS -o /dev/null "$API_URL/api/health" 2>/dev/null && api_state='正常'
+  say '系统状态'
+  printf '版本：v%s\n服务：%s · API：%s\nNode：%s · 磁盘：%s\n' "$version" "$service_state" "$api_state" "$node_version" "$disk"
   if [[ -f "$ENV_FILE" ]]; then
     say '访问地址'
     access_urls
   fi
-  if [[ -f "$APP_DIR/data/updates/state.json" ]]; then say '最近更新状态'; cat "$APP_DIR/data/updates/state.json" | pretty_json; fi
+  if [[ -f "$APP_DIR/data/updates/state.json" ]]; then
+    python3 - "$APP_DIR/data/updates/state.json" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    labels = {"idle": "空闲", "checking": "检查中", "downloading": "下载中", "installing": "安装中", "completed": "已完成", "failed": "失败", "rolled-back": "已回滚"}
+    status = labels.get(data.get("status"), data.get("status") or "未知")
+    version = data.get("version") or "-"
+    print(f"最近更新：{status} · v{version}")
+    if data.get("detail") and data.get("status") in {"failed", "rolled-back"}:
+        print(f"原因：{data['detail']}")
+except Exception:
+    pass
+PY
+  fi
 }
 
 service_logs() {
+  say '最近 50 行服务日志'
   if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
-    journalctl -u "$SERVICE_NAME" --no-pager -n 100
+    journalctl -u "$SERVICE_NAME" --no-pager -n 50 -o short-iso
   elif command -v docker >/dev/null && [[ -f "$APP_DIR/docker-compose.yml" ]]; then
-    (cd "$APP_DIR" && docker compose logs --tail 100)
+    (cd "$APP_DIR" && docker compose logs --tail 50)
   else
     die '未找到可读取的 systemd 或 Docker 服务。'
   fi
@@ -575,7 +668,8 @@ menu() {
   5) 系统配置
   6) 备份与恢复
   7) 服务维护
-  8) 卸载系统（危险操作）
+  8) 查看最近服务日志
+  9) 卸载系统（危险操作）
   0) 退出
 EOF
     local choice; read -r -p '请输入编号: ' choice
@@ -587,7 +681,8 @@ EOF
       5) system_config_menu ;;
       6) backup_menu ;;
       7) service_menu ;;
-      8) uninstall_menu ;;
+      8) run_menu_action service_logs ;;
+      9) uninstall_menu ;;
       0) break ;;
       *) say '无效选项。' ;;
     esac
