@@ -11,7 +11,6 @@ import {
   ListChecks,
   LogOut,
   Menu,
-  PackageOpen,
   RefreshCw,
   Search,
   Settings,
@@ -41,9 +40,7 @@ const groups = [
     label: '内容',
     links: [
       { to: '/sites', label: '静态网站', icon: Layers3, permission: 'content.read' },
-      { to: '/software', label: '软件管理', icon: Box, permission: 'content.read' },
-      { to: '/versions', label: '版本管理', icon: PackageOpen, permission: 'content.read' },
-      { to: '/packages', label: '安装包', icon: PackageOpen, permission: 'content.read' },
+      { to: '/software', label: '软件发布', icon: Box, permission: 'content.read' },
       { to: '/announcements', label: '公告管理', icon: Sparkles, permission: 'content.read' },
       { to: '/analytics', label: '数据统计', icon: Activity, permission: 'analytics.read' },
       { to: '/audit-logs', label: '操作日志', icon: ClipboardList, permission: 'audit.read' },
@@ -60,9 +57,7 @@ const pageMeta: Record<string, { title: string; description: string }> = {
   '/domains': { title: '域名管理', description: '接入、验证并管理每一个数字入口。' },
   '/redirects': { title: '跳转规则', description: '灵活编排域名和路径的去向。' },
   '/sites': { title: '静态网站', description: '上传、发布并绑定你的静态页面。' },
-  '/software': { title: '软件管理', description: '管理软件资料、版本与发布状态。' },
-  '/versions': { title: '版本管理', description: '维护版本说明、平台信息和下载状态。' },
-  '/packages': { title: '安装包', description: '管理对象存储中的安装包文件。' },
+  '/software': { title: '软件发布', description: '从产品、版本到安装包，在一个工作区完成发布。' },
   '/announcements': { title: '公告管理', description: '发布软件下载中心和公开页面的最新通知。' },
   '/analytics': { title: '数据统计', description: '从访问入口到内容交付的完整洞察。' },
   '/audit-logs': { title: '操作日志', description: '追踪管理员登录、配置变更与发布操作。' },
@@ -80,7 +75,7 @@ export function AdminShell({ settings, bootstrapStatus, bootstrapError, onRetry 
   const location = useLocation()
   const navigate = useNavigate()
   const { admin, logout } = useAuth()
-  const meta = pageMeta[location.pathname] ?? pageMeta['/']
+  const meta = location.pathname.startsWith('/software/') ? pageMeta['/software'] : pageMeta[location.pathname] ?? pageMeta['/']
   const visibleGroups = useMemo(() => groups.map((group) => ({ ...group, links: group.links.filter((item) => !('permission' in item) || admin?.permissions.includes(item.permission as never)) })), [admin])
   const searchableLinks = useMemo(() => visibleGroups.flatMap((group) => group.links), [visibleGroups])
   const searchResults = searchableLinks.filter((item) => item.label.toLowerCase().includes(search.trim().toLowerCase())).slice(0, 6)

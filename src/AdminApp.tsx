@@ -12,12 +12,10 @@ import { AnnouncementsPage } from './pages/admin/AnnouncementsPage'
 import { AuditLogsPage } from './pages/admin/AuditLogsPage'
 import { DashboardPage } from './pages/admin/DashboardPage'
 import { DomainsPage } from './pages/admin/DomainsPage'
-import { PackagesPage } from './pages/admin/PackagesPage'
 import { RedirectsPage } from './pages/admin/RedirectsPage'
 import { SettingsPage } from './pages/admin/SettingsPage'
 import { SitesPage } from './pages/admin/SitesPage'
 import { SoftwarePage } from './pages/admin/SoftwarePage'
-import { VersionsPage } from './pages/admin/VersionsPage'
 import { TasksPage } from './pages/admin/TasksPage'
 import { SecurityPage } from './pages/admin/SecurityPage'
 import type { AnalyticsData, AuditLogRecord, BrandSettings, DomainRecord, PackageRecord, PlatformAlert, PlatformIntegrations, RedirectRuleRecord, SiteRecord, SoftwareRecord, StorageStatus } from './types'
@@ -92,9 +90,10 @@ export default function AdminApp() {
         <Route path="domains" element={<DomainsPage domains={domains} setDomains={setDomains} sites={sites} />} />
         <Route path="redirects" element={<RedirectsPage domains={domains} rules={redirectRules} setRules={setRedirectRules} />} />
         <Route path="sites" element={<SitesPage sites={sites} setSites={setSites} domains={domains} />} />
-        <Route path="software" element={<SoftwarePage software={software} setSoftware={setSoftware} />} />
-        <Route path="versions" element={<VersionsPage software={software} />} />
-        <Route path="packages" element={<PackagesPage packages={packages} setPackages={setPackages} software={software} setSoftware={setSoftware} storage={storage} />} />
+        <Route path="software" element={<SoftwarePage software={software} setSoftware={setSoftware} packages={packages} setPackages={setPackages} storage={storage} />} />
+        <Route path="software/:softwareId" element={<SoftwarePage software={software} setSoftware={setSoftware} packages={packages} setPackages={setPackages} storage={storage} />} />
+        <Route path="versions" element={<Navigate to="/software" replace />} />
+        <Route path="packages" element={<Navigate to="/software" replace />} />
         <Route path="announcements" element={<AnnouncementsPage />} />
         <Route path="analytics" element={<PermissionRoute permission="analytics.read"><AnalyticsPage domains={domains} software={software} analytics={analytics} setAnalytics={setAnalytics} /></PermissionRoute>} />
         <Route path="audit-logs" element={<PermissionRoute permission="audit.read"><AuditLogsPage /></PermissionRoute>} />

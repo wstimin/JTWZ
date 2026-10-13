@@ -126,6 +126,7 @@ try {
   const domainDispatcher = readFileSync(resolve(root, 'deploy/installer/jtwz-domain-dispatch'), 'utf8')
   const sharedStyles = readFileSync(resolve(root, 'src/styles.css'), 'utf8')
   const themeContext = readFileSync(resolve(root, 'src/contexts/ThemeContext.tsx'), 'utf8')
+  const adminShell = readFileSync(resolve(root, 'src/components/AdminShell.tsx'), 'utf8')
   const htmlEntries = ['index.html', 'apps/public/index.html', 'apps/admin/index.html']
     .map((path) => readFileSync(resolve(root, path), 'utf8'))
   assert.match(installer, /User=jtwz/)
@@ -152,6 +153,8 @@ try {
   assert.match(themeContext, /localStorage\.getItem\(storageKey\)/)
   assert.match(themeContext, /useLayoutEffect/)
   assert.ok(htmlEntries.every((html) => !html.includes('<script>')), 'theme bootstrapping must comply with the inline-script CSP')
+  assert.match(adminShell, /label: '软件发布'/)
+  assert.doesNotMatch(adminShell, /to: '\/versions'|to: '\/packages'/)
 
   console.log('stage6: RBAC, CSRF, request IDs, 2FA, sessions, login alerts, audit metadata and low-privilege deployment passed')
   if (serverError) assert.doesNotMatch(serverError, /Error|Exception/)

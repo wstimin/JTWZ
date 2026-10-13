@@ -1,7 +1,7 @@
 import { CheckCircle2, Cloud, Copy, FileArchive, PauseCircle, Pencil, PlayCircle, Plus, Search, Trash2, UploadCloud } from 'lucide-react'
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
-import type { PackageRecord, SoftwareRecord, StorageStatus } from '../../types'
+import type { PackageRecord, SoftwareRecord, SoftwareVersionRecord, StorageStatus } from '../../types'
 import { Modal } from '../../components/Modal'
 import { useToast } from '../../contexts/ToastContext'
 import { useAuth } from '../../contexts/AuthContext'
@@ -25,19 +25,29 @@ type ResumableSession = {
   updatedAt: string
 }
 
-export function PackagesPage({ packages, setPackages, software, setSoftware, storage }: { packages: PackageRecord[]; setPackages: Dispatch<SetStateAction<PackageRecord[]>>; software: SoftwareRecord[]; setSoftware: Dispatch<SetStateAction<SoftwareRecord[]>>; storage: StorageStatus }) {
+export function PackagesPage({ packages, setPackages, software, storage, lockedSoftwareId, lockedVersion, embedded = false, onClearVersion, onChanged }: {
+  packages: PackageRecord[]
+  setPackages: Dispatch<SetStateAction<PackageRecord[]>>
+  software: SoftwareRecord[]
+  storage: StorageStatus
+  lockedSoftwareId?: string
+  lockedVersion?: SoftwareVersionRecord | null
+  embedded?: boolean
+  onClearVersion?: () => void
+  onChanged?: () => void
+}) {
   const [open, setOpen] = useState(false)
   const [file, setFile] = useState<File | null>(null)
-  const [softwareId, setSoftwareId] = useState(software[0]?.id || '')
-  const [version, setVersion] = useState('')
+  const [softwareId, setSoftwareId] = useState(lockedSoftwareId || software[0]?.id || '')
+  const [version, setVersion] = useState(lockedVersion?.version || '')
   const [platform, setPlatform] = useState('Windows')
   const [architecture, setArchitecture] = useState('x64')
   const [query, setQuery] = useState('')
   const [uploading, setUploading] = useState(false)
   const [editing, setEditing] = useState<PackageRecord | null>(null)
   const [editPlatform, setEditPlatform] = useState('')
-  const [editReleaseNotes, setEditReleaseNotes] = useState('')
   const [saving, setSaving] = useState(false)
+  const [availableVersions, setAvailableVersions] = useState<SoftwareVersionRecord[]>([])
   const [resumableSessions, setResumableSessions] = useState<ResumableSession[]>([])
   const [activeUploadId, setActiveUploadId] = useState('')
   const [uploadProgress, setUploadProgress] = useState(0)
@@ -47,8 +57,31 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
   const canManage = Boolean(admin?.permissions.includes('content.manage'))
 
   useEffect(() => {
-    if (!softwareId && software[0]) setSoftwareId(software[0].id)
-  }, [software, softwareId])
+    if (lockedSoftwareId) setSoftwareId(lockedSoftwareId)
+    else if (!softwareId && software[0]) setSoftwareId(software[0].id)
+  }, [lockedSoftwareId, software, softwareId])
+
+  useEffect(() => {
+    if (lockedVersion) setVersion(lockedVersion.version)
+  }, [lockedVersion])
+
+  async function loadVersions(targetSoftwareId = softwareId) {
+    if (!targetSoftwareId) {
+      setAvailableVersions([])
+      return []
+    }
+    try {
+      const result = await apiRequest<{ versions: SoftwareVersionRecord[] }>(`/api/versions?softwareId=${encodeURIComponent(targetSoftwareId)}`)
+      const activeVersions = result.versions.filter((item) => item.status !== 'archived')
+      setAvailableVersions(activeVersions)
+      return activeVersions
+    } catch {
+      setAvailableVersions([])
+      return []
+    }
+  }
+
+  useEffect(() => { void loadVersions() }, [softwareId])
 
   async function loadResumableSessions() {
     if (storage.provider !== 'local') return
@@ -62,7 +95,11 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
 
   useEffect(() => { void loadResumableSessions() }, [storage.provider])
 
-  const filtered = useMemo(() => packages.filter((item) => `${item.fileName} ${item.software} ${item.platform}`.toLowerCase().includes(query.toLowerCase())), [packages, query])
+  const filtered = useMemo(() => packages.filter((item) => {
+    if (lockedSoftwareId && item.softwareId !== lockedSoftwareId) return false
+    if (lockedVersion && item.versionId !== lockedVersion.id && item.version !== lockedVersion.version) return false
+    return `${item.fileName} ${item.software} ${item.platform}`.toLowerCase().includes(query.toLowerCase())
+  }), [lockedSoftwareId, lockedVersion, packages, query])
   const fileSelected = (event: ChangeEvent<HTMLInputElement>) => setFile(event.target.files?.[0] ?? null)
 
   async function upload(event: FormEvent<HTMLFormElement>) {
@@ -89,10 +126,10 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
         const result = await apiRequest<{ package?: PackageRecord }>(`/api/packages/${encodeURIComponent(multipart.packageId)}/multipart/${encodeURIComponent(multipart.uploadId)}/complete`, { method: 'POST', body: JSON.stringify({ parts }), headers: { 'Content-Type': 'application/json' } })
         if (!result.package) throw new Error('云端分片合并后元数据保存失败')
         setPackages((current) => [result.package!, ...current])
-        setSoftware((current) => current.map((item) => item.id === result.package!.softwareId ? { ...item, version: result.package!.version, size: result.package!.size, downloadUrl: result.package!.downloadUrl } : item))
+        onChanged?.()
         setOpen(false)
         setFile(null)
-        setVersion('')
+        setVersion(lockedVersion?.version || '')
         notify('安装包已通过云端 multipart 分片上传完成')
         return
       }
@@ -125,10 +162,10 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
         const result = await apiRequest<{ package?: PackageRecord }>(`/api/packages/resumable/${encodeURIComponent(resumable.uploadId)}/complete`, { method: 'POST' })
         if (!result.package) throw new Error('分片上传完成但元数据保存失败')
         setPackages((current) => [result.package!, ...current])
-        setSoftware((current) => current.map((item) => item.id === result.package!.softwareId ? { ...item, version: result.package!.version, size: result.package!.size, downloadUrl: result.package!.downloadUrl } : item))
+        onChanged?.()
         setOpen(false)
         setFile(null)
-        setVersion('')
+        setVersion(lockedVersion?.version || '')
         setActiveUploadId('')
         setUploadProgress(0)
         await loadResumableSessions()
@@ -143,10 +180,10 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
       const result = await apiRequest<{ package?: PackageRecord }>(`/api/packages/${encodeURIComponent(intent.packageId)}/complete`, { method: 'POST' })
       if (!result.package) throw new Error('安装包元数据保存失败')
       setPackages((current) => [result.package!, ...current])
-      setSoftware((current) => current.map((item) => item.id === result.package!.softwareId ? { ...item, version: result.package!.version, size: result.package!.size, downloadUrl: result.package!.downloadUrl } : item))
+      onChanged?.()
       setOpen(false)
       setFile(null)
-      setVersion('')
+      setVersion(lockedVersion?.version || '')
       notify('安装包上传完成，SHA-256 校验值已生成')
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : '安装包上传失败', 'info')
@@ -185,6 +222,7 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
     try {
       await apiJson(`/api/packages/${encodeURIComponent(item.id)}`, 'DELETE')
       setPackages((current) => current.filter((entry) => entry.id !== item.id))
+      onChanged?.()
       notify('安装包及存储文件已删除', 'info')
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : '安装包删除失败', 'info')
@@ -196,6 +234,7 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
       const nextStatus = item.status === 'available' ? 'paused' : 'available'
       const result = await apiJson<{ package: PackageRecord }>(`/api/packages/${encodeURIComponent(item.id)}`, 'PATCH', { status: nextStatus })
       setPackages((current) => current.map((entry) => entry.id === item.id ? result.package : entry))
+      onChanged?.()
       notify(nextStatus === 'available' ? '安装包已恢复下载' : '安装包已暂停下载')
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : '安装包状态更新失败', 'info')
@@ -205,7 +244,6 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
   function beginEdit(item: PackageRecord) {
     setEditing(item)
     setEditPlatform(item.platform)
-    setEditReleaseNotes(item.releaseNotes || '')
   }
 
   async function savePackage(event: FormEvent<HTMLFormElement>) {
@@ -215,7 +253,6 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
     try {
       const result = await apiJson<{ package: PackageRecord }>(`/api/packages/${encodeURIComponent(editing.id)}`, 'PATCH', {
         platform: editPlatform,
-        releaseNotes: editReleaseNotes,
       })
       setPackages((current) => current.map((entry) => entry.id === editing.id ? result.package : entry))
       setEditing(null)
@@ -233,24 +270,41 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
     notify('15 分钟有效的签名下载地址已复制')
   }
 
+  const visibleSessions = resumableSessions.filter((item) => {
+    if (lockedSoftwareId && item.softwareId !== lockedSoftwareId) return false
+    if (lockedVersion && item.version !== lockedVersion.version) return false
+    return true
+  })
+
+  async function openUpload() {
+    const currentVersions = await loadVersions()
+    const targetVersion = lockedVersion?.version || currentVersions[0]?.version || ''
+    if (!targetVersion) return notify('请先在上方创建发布版本', 'info')
+    setActiveUploadId('')
+    setUploadProgress(0)
+    setFile(null)
+    setVersion(targetVersion)
+    setOpen(true)
+  }
+
   return (
-    <div className="page-stack">
-      <section className="storage-strip panel">
+    <div className={embedded ? 'software-release-section' : 'page-stack'} id="software-package-library">
+      {!embedded ? <section className="storage-strip panel">
         <div><Cloud /><div><span className="overline">Object storage</span><h2>{storage.provider === 's3' ? 'S3 兼容对象存储已接入' : '本地对象存储运行正常'}</h2><p>浏览器直传后由服务端校验文件元数据；可接入 R2、OSS、COS 或其他 S3 兼容服务。</p></div></div>
         <span className="content-status" data-status={storage.configured ? 'available' : 'paused'}><CheckCircle2 /> {storage.configured ? '已连接' : '待配置'}</span>
-      </section>
+      </section> : null}
 
-      {canManage && resumableSessions.length ? <section className="panel resumable-panel"><div className="toolbar-copy"><span className="overline">Resumable uploads</span><h2>未完成的大文件上传</h2><p>重新选择相同文件即可从服务器已保存的分片继续。</p></div><div className="resumable-list">{resumableSessions.map((item) => <article key={item.id}><FileArchive /><div><strong>{item.fileName}</strong><span>{item.version} · {item.platform} · {new Date(item.updatedAt).toLocaleString('zh-CN')}</span><i><b style={{ width: `${item.progress}%` }} /></i></div><em>{item.progress}%</em><button className="button button--secondary" type="button" onClick={() => resumeSession(item)}>继续</button><button className="icon-button danger-icon" type="button" aria-label="清除未完成上传" title="清除未完成上传" onClick={() => void removeSession(item)}><Trash2 /></button></article>)}</div></section> : null}
+      {canManage && visibleSessions.length ? <section className="panel resumable-panel"><div className="toolbar-copy"><span className="overline">Resumable uploads</span><h2>未完成的大文件上传</h2><p>重新选择相同文件即可从服务器已保存的分片继续。</p></div><div className="resumable-list">{visibleSessions.map((item) => <article key={item.id}><FileArchive /><div><strong>{item.fileName}</strong><span>{item.version} · {item.platform} · {new Date(item.updatedAt).toLocaleString('zh-CN')}</span><i><b style={{ width: `${item.progress}%` }} /></i></div><em>{item.progress}%</em><button className="button button--secondary" type="button" onClick={() => resumeSession(item)}>继续</button><button className="icon-button danger-icon" type="button" aria-label="清除未完成上传" title="清除未完成上传" onClick={() => void removeSession(item)}><Trash2 /></button></article>)}</div></section> : null}
 
       <section className="panel table-panel">
-        <div className="toolbar"><div className="toolbar-copy"><span className="overline">Packages</span><h2>安装包文件</h2></div><div className="toolbar-actions"><label className="search-control"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件名…" /></label>{canManage ? <button className="button button--primary" onClick={() => { setActiveUploadId(''); setUploadProgress(0); setFile(null); setOpen(true) }}><Plus /> 上传安装包</button> : null}</div></div>
+        <div className="toolbar"><div className="toolbar-copy"><span className="overline">03 · Packages</span><h2>{lockedVersion ? `v${lockedVersion.version} 的安装包` : '全部安装包'}</h2><p>{lockedVersion ? '这里只显示当前版本的交付文件。' : '选择上方某个版本，可以集中管理它的交付文件。'}</p></div><div className="toolbar-actions">{lockedVersion && onClearVersion ? <button className="button button--secondary" type="button" onClick={onClearVersion}>全部安装包</button> : null}<label className="search-control"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件名…" /></label>{canManage ? <button className="button button--primary" onClick={() => void openUpload()}><Plus /> 上传安装包</button> : null}</div></div>
         <div className="data-table-wrap">
           <table className="data-table package-table">
-            <thead><tr><th>文件</th><th>软件 / 版本</th><th>平台</th><th>大小</th><th>存储位置</th><th>下载</th><th>状态</th><th /></tr></thead>
+            <thead><tr><th>文件</th><th>{embedded ? '版本' : '软件 / 版本'}</th><th>平台</th><th>大小</th><th>存储位置</th><th>下载</th><th>状态</th><th /></tr></thead>
             <tbody>{filtered.map((item) => (
               <tr key={item.id}>
                 <td><div className="table-title"><span className="table-icon"><FileArchive /></span><div><strong>{item.fileName}</strong>{item.sha256 ? <small title={item.sha256}>SHA-256 · {item.sha256.slice(0, 12)}…</small> : null}</div></div></td>
-                <td><div className="table-stack"><strong>{item.software}</strong><small>v{item.version}</small></div></td>
+                <td><div className="table-stack"><strong>{embedded ? `v${item.version}` : item.software}</strong>{!embedded ? <small>v{item.version}</small> : null}</div></td>
                 <td>{item.platform}</td><td>{item.size}</td><td><span className="table-muted">{item.storage}</span></td><td><strong>{item.downloads.toLocaleString()}</strong></td>
                 <td><span className="content-status" data-status={item.status}>{item.status === 'available' ? <CheckCircle2 /> : <PauseCircle />}{packageStatus[item.status]}</span></td>
                 <td><div className="row-actions"><button aria-label="复制签名下载地址" onClick={() => copyDownload(item)}><Copy /></button>{canManage ? <><button aria-label="编辑安装包信息" title="编辑安装包信息" onClick={() => beginEdit(item)}><Pencil /></button><button aria-label={item.status === 'available' ? '暂停下载' : '恢复下载'} title={item.status === 'available' ? '暂停下载' : '恢复下载'} onClick={() => void togglePackage(item)}>{item.status === 'available' ? <PauseCircle /> : <PlayCircle />}</button><button className="danger-icon" aria-label="删除安装包" title="删除安装包" onClick={() => void removePackage(item)}><Trash2 /></button></> : null}</div></td>
@@ -264,7 +318,7 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
       <Modal open={open} onClose={() => { if (!uploading) setOpen(false) }} eyebrow="Direct upload" title={activeUploadId ? '继续上传安装包' : '上传安装包'} footer={<><button className="button button--secondary" type="button" onClick={() => setOpen(false)} disabled={uploading}>取消</button>{uploading && activeUploadId ? <button className="button button--secondary" type="button" onClick={() => { pauseRequested.current = true }}><PauseCircle /> 暂停上传</button> : null}<button className="button button--primary" type="submit" form="package-upload-form" disabled={uploading}><UploadCloud /> {uploading ? `上传中 ${uploadProgress}%` : activeUploadId ? '继续上传' : '开始上传'}</button></>}>
         <form id="package-upload-form" className="form-stack" onSubmit={upload}>
           <label className="upload-zone"><input type="file" accept=".exe,.msi,.dmg,.pkg,.apk,.zip,.deb,.rpm,.AppImage,.tar,.gz" onChange={fileSelected} />{file ? <><FileArchive /><strong>{file.name}</strong><span>{(file.size / 1024 / 1024).toFixed(2)} MB · 已准备上传</span></> : <><UploadCloud /><strong>选择安装包</strong><span>支持 EXE、MSI、DMG、APK、ZIP、DEB、RPM 等格式</span></>}</label>
-          <div className="field-grid"><label className="field"><span>所属软件</span><select value={softwareId} onChange={(event) => setSoftwareId(event.target.value)} required>{software.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label className="field"><span>版本号</span><input value={version} onChange={(event) => setVersion(event.target.value)} placeholder="2.4.2" required /></label></div>
+          <div className="field-grid"><label className="field"><span>所属软件</span>{lockedSoftwareId ? <input value={software.find((item) => item.id === softwareId)?.name || ''} readOnly /> : <select value={softwareId} onChange={(event) => setSoftwareId(event.target.value)} required>{software.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select>}</label><label className="field"><span>发布版本</span>{lockedVersion ? <input value={`v${lockedVersion.version}`} readOnly /> : <select value={version} onChange={(event) => setVersion(event.target.value)} required><option value="">请选择版本</option>{availableVersions.map((item) => <option value={item.version} key={item.id}>v{item.version} · {item.channel === 'stable' ? '正式版' : item.channel}</option>)}</select>}</label></div>
           <div className="field-grid"><label className="field"><span>操作系统</span><select value={platform} onChange={(event) => setPlatform(event.target.value)}><option>Windows</option><option>macOS</option><option>Android</option><option>Linux</option></select></label><label className="field"><span>CPU 架构</span><select value={architecture} onChange={(event) => setArchitecture(event.target.value)}><option>x64</option><option>ARM64</option><option>Universal</option></select></label></div>
         </form>
       </Modal>
@@ -272,8 +326,7 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
       <Modal open={Boolean(editing)} onClose={() => { if (!saving) setEditing(null) }} eyebrow="Package metadata" title="编辑安装包信息" footer={<><button className="button button--secondary" type="button" onClick={() => setEditing(null)} disabled={saving}>取消</button><button className="button button--primary" type="submit" form="package-edit-form" disabled={saving}>{saving ? '保存中…' : '保存修改'}</button></>}>
         <form id="package-edit-form" className="form-stack" onSubmit={savePackage}>
           <label className="field"><span>平台与架构</span><input value={editPlatform} onChange={(event) => setEditPlatform(event.target.value)} placeholder="Windows x64" required /></label>
-          <label className="field"><span>发布说明</span><textarea value={editReleaseNotes} onChange={(event) => setEditReleaseNotes(event.target.value)} rows={6} placeholder="说明此安装包的适用范围、变更内容或安装注意事项" /></label>
-          <p className="form-help">文件名、文件内容、版本归属与 SHA-256 校验值不可在此修改；如文件本身有误，请删除后重新上传。</p>
+          <p className="form-help">更新说明由所属版本统一维护。文件名、文件内容、版本归属与 SHA-256 校验值不可在此修改；如文件本身有误，请删除后重新上传。</p>
         </form>
       </Modal>
     </div>

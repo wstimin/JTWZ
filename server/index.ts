@@ -1528,14 +1528,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
       db.prepare(`INSERT INTO software
         (id, name, slug, description, version, platform, architecture, size, download_url, downloads, status, accent, updated_at, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, ?, ?, ?)`)
-        .run(id, name, slug, String(body.description || ''), String(body.version || '1.0.0'), String(body.platform || 'Windows'),
-          String(body.architecture || 'Universal'), status, accent, timestamp, timestamp)
-      const initialVersion = String(body.version || '1.0.0').trim()
-      db.prepare(`INSERT INTO software_versions
-        (id, software_id, version, channel, release_notes, status, is_recommended, published_at, updated_at, created_at)
-        VALUES (?, ?, ?, 'stable', '', ?, ?, ?, ?, ?)`)
-        .run(randomUUID(), id, initialVersion, status === 'published' ? 'published' : 'draft', status === 'published' ? 1 : 0,
-          status === 'published' ? timestamp : null, timestamp, timestamp)
+        .run(id, name, slug, String(body.description || ''), '', '', '', status, accent, timestamp, timestamp)
     } catch (error) {
       if (String(error).includes('UNIQUE')) throw new HttpError(409, '该软件标识已经存在')
       throw error
@@ -1560,8 +1553,8 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
       if (!deliverableCount) throw new HttpError(409, '上架软件前需要至少一个已发布版本及可用安装包')
     }
     const timestamp = new Date().toISOString()
-    db.prepare(`UPDATE software SET name = ?, description = ?, architecture = ?, status = ?, updated_at = ? WHERE id = ?`)
-      .run(name, String(body.description ?? current.description), String(body.architecture ?? current.architecture), status, timestamp, id)
+    db.prepare(`UPDATE software SET name = ?, description = ?, status = ?, updated_at = ? WHERE id = ?`)
+      .run(name, String(body.description ?? current.description), status, timestamp, id)
     audit(admin.id, 'update', 'software', id, name)
     sendJson(response, 200, { software: mapSoftware(db.prepare('SELECT * FROM software WHERE id = ?').get(id) as Row) })
     return

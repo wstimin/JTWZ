@@ -188,6 +188,8 @@ try {
   assert.equal(rolledBack.task.status, 'succeeded')
 
   const software = await json('/api/software', 'POST', { name: 'Stage 4 App', slug: 'stage4-app', version: '1.0.0', platform: 'Windows' })
+  const emptyVersionList = await json(`/api/versions?softwareId=${software.software.id}`)
+  assert.equal(emptyVersionList.versions.length, 0, 'creating a product must not create a duplicate placeholder release')
   const smallFile = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from('JTWZ stage 4 package integrity test')])
   const smallSha = createHash('sha256').update(smallFile).digest('hex')
   const intent = await json('/api/packages/upload-intent', 'POST', { fileName: 'stage4.zip', softwareId: software.software.id, version: '1.0.0', platform: 'Windows x64', contentType: 'application/zip', byteSize: smallFile.length, sha256: smallSha })

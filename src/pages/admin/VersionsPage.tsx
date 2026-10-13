@@ -19,9 +19,16 @@ const emptyDraft: VersionDraft = { softwareId: '', version: '', channel: 'stable
 const statusLabels = { draft: '草稿', published: '已发布', archived: '已归档' }
 const channelLabels = { stable: '正式版', beta: 'Beta', alpha: 'Alpha' }
 
-export function VersionsPage({ software }: { software: SoftwareRecord[] }) {
+export function VersionsPage({ software, lockedSoftwareId, embedded = false, refreshKey = 0, onChanged, onManagePackages }: {
+  software: SoftwareRecord[]
+  lockedSoftwareId?: string
+  embedded?: boolean
+  refreshKey?: number
+  onChanged?: () => void
+  onManagePackages?: (version: SoftwareVersionRecord) => void
+}) {
   const [versions, setVersions] = useState<SoftwareVersionRecord[]>([])
-  const [softwareId, setSoftwareId] = useState('')
+  const [softwareId, setSoftwareId] = useState(lockedSoftwareId || '')
   const [query, setQuery] = useState('')
   const [editingId, setEditingId] = useState('')
   const [draft, setDraft] = useState<VersionDraft>(emptyDraft)
@@ -40,7 +47,8 @@ export function VersionsPage({ software }: { software: SoftwareRecord[] }) {
     }
   }
 
-  useEffect(() => { void load() }, [softwareId])
+  useEffect(() => { if (lockedSoftwareId) setSoftwareId(lockedSoftwareId) }, [lockedSoftwareId])
+  useEffect(() => { void load() }, [softwareId, refreshKey])
 
   const filtered = useMemo(() => versions.filter((item) => `${item.software} ${item.version} ${item.channel} ${item.platforms.join(' ')}`.toLowerCase().includes(query.toLowerCase())), [versions, query])
   const editingVersion = versions.find((item) => item.id === editingId)
@@ -70,6 +78,7 @@ export function VersionsPage({ software }: { software: SoftwareRecord[] }) {
         setVersions((current) => current.map((item) => item.softwareId === result.version.softwareId && item.id !== result.version.id ? { ...item, isRecommended: false } : item))
       }
       setOpen(false)
+      onChanged?.()
       notify(editingId ? '版本资料已更新' : '发布版本已创建')
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : '版本保存失败', 'info')
@@ -82,6 +91,7 @@ export function VersionsPage({ software }: { software: SoftwareRecord[] }) {
     try {
       const result = await apiJson<{ version: SoftwareVersionRecord }>(`/api/versions/${encodeURIComponent(item.id)}`, 'PUT', { isRecommended: true })
       setVersions((current) => current.map((entry) => entry.softwareId === item.softwareId ? (entry.id === item.id ? result.version : { ...entry, isRecommended: false }) : entry))
+      onChanged?.()
       notify(`v${item.version} 已设为推荐版本`)
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : '推荐版本设置失败', 'info')
@@ -92,6 +102,7 @@ export function VersionsPage({ software }: { software: SoftwareRecord[] }) {
     try {
       const result = await apiJson<{ version: SoftwareVersionRecord }>(`/api/versions/${encodeURIComponent(item.id)}`, 'PUT', { status: item.status === 'archived' ? 'draft' : 'archived', isRecommended: false })
       setVersions((current) => current.map((entry) => entry.id === item.id ? result.version : entry))
+      onChanged?.()
       notify(result.version.status === 'archived' ? '版本已归档' : '版本已恢复为草稿', 'info')
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : '版本状态更新失败', 'info')
@@ -103,19 +114,20 @@ export function VersionsPage({ software }: { software: SoftwareRecord[] }) {
     try {
       await apiJson(`/api/versions/${encodeURIComponent(item.id)}`, 'DELETE')
       setVersions((current) => current.filter((entry) => entry.id !== item.id))
+      onChanged?.()
       notify('版本记录已删除', 'info')
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : '版本删除失败', 'info')
     }
   }
 
-  return <div className="page-stack">
+  return <div className={embedded ? 'software-release-section' : 'page-stack'}>
     <section className="panel table-panel">
       <div className="toolbar">
-        <div className="toolbar-copy"><span className="overline">Release management</span><h2>软件版本管理</h2><p>版本是独立发布记录，安装包按平台归属到对应版本。</p></div>
-        <div className="toolbar-actions"><label className="select-control"><select value={softwareId} onChange={(event) => setSoftwareId(event.target.value)}><option value="">全部软件</option>{software.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label className="search-control"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索版本、通道或平台…" /></label>{canManage ? <button className="button button--primary" type="button" onClick={openCreate}><Plus /> 新建版本</button> : null}</div>
+        <div className="toolbar-copy"><span className="overline">02 · Releases</span><h2>发布版本</h2><p>先建立版本并填写更新说明，再为该版本上传各平台安装包。</p></div>
+        <div className="toolbar-actions">{!lockedSoftwareId ? <label className="select-control"><select value={softwareId} onChange={(event) => setSoftwareId(event.target.value)}><option value="">全部软件</option>{software.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : null}<label className="search-control"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索版本、通道或平台…" /></label>{canManage ? <button className="button button--primary" type="button" onClick={openCreate}><Plus /> 新建版本</button> : null}</div>
       </div>
-      <div className="data-table-wrap"><table className="data-table"><thead><tr><th>软件 / 版本</th><th>通道</th><th>安装包</th><th>下载</th><th>状态</th><th>更新时间</th>{canManage ? <th /> : null}</tr></thead><tbody>{filtered.map((item) => <tr key={item.id}><td><div className="table-stack"><strong>{item.software} · v{item.version}</strong><small>{item.isRecommended ? '推荐版本' : item.releaseNotes ? item.releaseNotes.slice(0, 44) : '暂无更新说明'}</small></div></td><td>{channelLabels[item.channel]}</td><td><div className="table-stack"><strong>{item.packageCount} 个</strong><small>{item.platforms.join(' / ') || '尚未上传'}</small></div></td><td>{item.downloads.toLocaleString()}</td><td><span className="content-status" data-status={item.status}>{statusLabels[item.status]}</span></td><td>{new Date(item.updatedAt).toLocaleDateString('zh-CN')}</td>{canManage ? <td><div className="row-actions">{!item.isRecommended && item.status !== 'archived' && item.packageCount > 0 ? <button aria-label="设为推荐版本" title="设为推荐版本" type="button" onClick={() => void markRecommended(item)}><Star /></button> : null}<button aria-label="编辑版本" title="编辑版本" type="button" onClick={() => openEdit(item)}><Edit3 /></button><button aria-label={item.status === 'archived' ? '恢复版本' : '归档版本'} title={item.status === 'archived' ? '恢复版本' : '归档版本'} type="button" onClick={() => void archiveVersion(item)}><Archive /></button><button className="danger-icon" aria-label="删除版本" title="删除版本" type="button" onClick={() => void removeVersion(item)}><Trash2 /></button></div></td> : null}</tr>)}</tbody></table></div>
+      <div className="data-table-wrap"><table className="data-table"><thead><tr><th>版本</th><th>通道</th><th>安装包</th><th>下载</th><th>状态</th><th>更新时间</th><th /></tr></thead><tbody>{filtered.map((item) => <tr key={item.id}><td><div className="table-stack"><strong>v{item.version}</strong><small>{item.isRecommended ? '推荐版本' : item.releaseNotes ? item.releaseNotes.slice(0, 44) : '暂无更新说明'}</small></div></td><td>{channelLabels[item.channel]}</td><td><button className="release-package-link" type="button" onClick={() => onManagePackages?.(item)}><strong>{item.packageCount} 个</strong><small>{item.platforms.join(' / ') || '上传安装包'}</small></button></td><td>{item.downloads.toLocaleString()}</td><td><span className="content-status" data-status={item.status}>{statusLabels[item.status]}</span></td><td>{new Date(item.updatedAt).toLocaleDateString('zh-CN')}</td><td><div className="row-actions">{onManagePackages ? <button aria-label={`管理 v${item.version} 安装包`} title="管理安装包" type="button" onClick={() => onManagePackages(item)}><PackageOpen /></button> : null}{canManage ? <>{!item.isRecommended && item.status !== 'archived' && item.packageCount > 0 ? <button aria-label="设为推荐版本" title="设为推荐版本" type="button" onClick={() => void markRecommended(item)}><Star /></button> : null}<button aria-label="编辑版本" title="编辑版本" type="button" onClick={() => openEdit(item)}><Edit3 /></button><button aria-label={item.status === 'archived' ? '恢复版本' : '归档版本'} title={item.status === 'archived' ? '恢复版本' : '归档版本'} type="button" onClick={() => void archiveVersion(item)}><Archive /></button><button className="danger-icon" aria-label="删除版本" title="删除版本" type="button" onClick={() => void removeVersion(item)}><Trash2 /></button></> : null}</div></td></tr>)}</tbody></table></div>
       {!filtered.length ? <div className="table-empty"><PackageOpen /><strong>暂无版本记录</strong><span>先创建一个发布版本，再上传对应平台的安装包。</span></div> : null}
     </section>
 

@@ -3742,6 +3742,167 @@ svg {
   color: var(--accent);
 }
 
+.software-release-workspace {
+  gap: 18px;
+}
+
+.software-release-section {
+  display: contents;
+}
+
+.release-product-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 26px;
+  gap: 24px;
+  background:
+    radial-gradient(circle at 88% 12%, var(--accent-soft), transparent 20rem),
+    var(--bg-elevated);
+}
+
+.release-product-heading {
+  display: grid;
+  gap: 22px;
+}
+
+.release-back {
+  display: inline-flex;
+  width: max-content;
+  padding: 0;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  color: var(--text-secondary);
+  background: transparent;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.release-back:hover { color: var(--accent); }
+.release-back svg { width: 15px; }
+
+.release-product-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 16px;
+}
+
+.release-product-title h2 {
+  margin: 4px 0 6px;
+  font-family: var(--font-display);
+  font-size: clamp(1.5rem, 3vw, 2.15rem);
+  font-weight: 600;
+}
+
+.release-product-title p,
+.toolbar-copy p {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.68rem;
+  line-height: 1.6;
+}
+
+.release-product-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.release-product-actions .content-status { margin-top: 5px; }
+
+.release-product-stats {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-block: 1px solid var(--border);
+}
+
+.release-product-stats span {
+  display: grid;
+  padding: 16px 18px;
+  gap: 5px;
+}
+
+.release-product-stats span + span { border-left: 1px solid var(--border); }
+.release-product-stats small { color: var(--text-tertiary); font-size: 0.62rem; }
+.release-product-stats strong { font-size: 0.82rem; }
+
+.release-flow {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  gap: 10px;
+  list-style: none;
+}
+
+.release-flow li {
+  display: flex;
+  padding: 12px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text-tertiary);
+  background: var(--bg-secondary);
+}
+
+.release-flow li > span {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  font-size: 0.68rem;
+}
+
+.release-flow li div { display: grid; gap: 2px; }
+.release-flow li strong { color: var(--text-primary); font-size: 0.72rem; }
+.release-flow li small { font-size: 0.6rem; }
+.release-flow li.is-complete { border-color: var(--border-strong); color: var(--success); background: color-mix(in srgb, var(--success) 6%, var(--bg-secondary)); }
+.release-flow li.is-complete > span { border-color: color-mix(in srgb, var(--success) 44%, var(--border)); color: var(--success); }
+
+.row-actions .release-manage-button {
+  display: inline-flex;
+  width: auto;
+  min-width: max-content;
+  padding: 0 10px;
+  align-items: center;
+  gap: 5px;
+  border-color: var(--border);
+  color: var(--text-secondary);
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.release-package-link {
+  display: grid;
+  padding: 0;
+  gap: 2px;
+  border: 0;
+  color: var(--text-primary);
+  background: transparent;
+  text-align: left;
+}
+
+.release-package-link:hover strong { color: var(--accent); }
+.release-package-link small { color: var(--text-tertiary); font-size: 0.62rem; }
+
+@media (max-width: 640px) {
+  .release-product-hero { padding: 18px; }
+  .release-product-title { align-items: flex-start; }
+  .release-product-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .release-product-stats span:nth-child(3) { border-left: 0; border-top: 1px solid var(--border); }
+  .release-product-stats span:nth-child(4) { border-top: 1px solid var(--border); }
+  .release-flow { grid-template-columns: 1fr; }
+  .release-product-actions .button { flex: 1; }
+}
+
 .content-status {
   padding: 5px 8px;
   border: 1px solid var(--border);
@@ -5007,6 +5168,11 @@ svg {
     align-items: flex-start;
     flex-direction: column;
   }
+
+  .release-product-hero { grid-template-columns: 1fr; }
+  .release-product-actions { justify-content: flex-start; flex-wrap: wrap; }
+  .release-product-stats,
+  .release-flow { grid-column: auto; }
 
   .rules-hero .button,
   .storage-strip .button {
