@@ -76,6 +76,10 @@ function readState() {
   try { return JSON.parse(readFileSync(statePath, 'utf8')) as Record<string, unknown> } catch { return null }
 }
 
+export function getUpdateState() {
+  return readState()
+}
+
 export async function checkForUpdate() {
   if (!config.updateManifestUrl || !config.updatePublicKey) {
     return {
@@ -165,6 +169,13 @@ export async function installUpdate() {
     writeFileSync(statePath, JSON.stringify(failed, null, 2), 'utf8')
     throw new Error(`安全更新执行器启动失败：${failed.error}`)
   })
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 500))
+  if (child.exitCode !== null && child.exitCode !== 0) {
+    const detail = `安全更新执行器立即退出（代码 ${child.exitCode}），请重新运行一键安装脚本修复执行权限`
+    const failed = { ...staged, status: 'executor_failed', detail, failedAt: new Date().toISOString() }
+    writeFileSync(statePath, JSON.stringify(failed, null, 2), 'utf8')
+    throw new Error(detail)
+  }
   child.unref()
   return { ...staged, applyStarted: true, message: '更新执行器已启动，服务将由进程管理器重启。' }
 }

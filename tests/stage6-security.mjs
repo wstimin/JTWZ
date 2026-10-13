@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 
 const root = resolve(import.meta.dirname, '..')
 const dataDir = mkdtempSync(resolve(tmpdir(), 'jtwz-stage6-'))
+const envPath = resolve(dataDir, 'config.env')
+writeFileSync(envPath, '')
 const port = 19787
 const base = `http://127.0.0.1:${port}`
 let child
@@ -59,7 +61,7 @@ async function api(session, path, method = 'GET', body, extraHeaders = {}) {
 }
 
 try {
-  child = spawn(process.execPath, ['dist-server/index.js'], { cwd: root, env: { ...process.env, DATA_DIR: dataDir, API_PORT: String(port), ADMIN_USERNAME: 'owner', ADMIN_PASSWORD: 'stage6-password', APP_SECRET: 'stage6-app-secret-for-security-tests', STORAGE_PROVIDER: 'local' }, stdio: ['ignore', 'pipe', 'pipe'] })
+  child = spawn(process.execPath, ['dist-server/index.js'], { cwd: root, env: { ...process.env, JTWZ_ENV_FILE: envPath, DATA_DIR: dataDir, API_PORT: String(port), ADMIN_USERNAME: 'owner', ADMIN_PASSWORD: 'stage6-password', APP_SECRET: 'stage6-app-secret-for-security-tests', STORAGE_PROVIDER: 'local' }, stdio: ['ignore', 'pipe', 'pipe'] })
   let serverError = ''
   child.stderr.on('data', (chunk) => { serverError += chunk.toString() })
   await waitForServer()
@@ -70,6 +72,10 @@ try {
 
   const owner = await login('owner', 'stage6-password')
   assert.ok(owner.csrf)
+  const systemConfig = await api(owner, '/api/admin/system/config', 'PUT', { storageProvider: 'local', dnsProvider: 'manual', certificateProvider: 'manual', dnsWebhookUrl: 'http://127.0.0.1:19999/jtwz' })
+  assert.equal(systemConfig.response.status, 200, systemConfig.payload.error)
+  assert.equal(systemConfig.payload.config.dnsWebhookUrl, 'http://127.0.0.1:19999/jtwz')
+  assert.match(readFileSync(envPath, 'utf8'), /DNS_WEBHOOK_URL=http:\/\/127\.0\.0\.1:19999\/jtwz/)
   const noCsrf = await fetch(`${base}/api/security/sessions/revoke-others`, { method: 'POST', headers: { Cookie: owner.cookie } })
   assert.equal(noCsrf.status, 403)
 
@@ -108,12 +114,16 @@ try {
 
   const installer = readFileSync(resolve(root, 'deploy/installer/install.sh'), 'utf8')
   const updater = readFileSync(resolve(root, 'deploy/installer/jtwz-update'), 'utf8')
+  const domainExecutor = readFileSync(resolve(root, 'deploy/installer/jtwz-domain'), 'utf8')
   assert.match(installer, /User=jtwz/)
   assert.match(installer, /ProtectSystem=strict/)
   assert.match(installer, /sudoers\.d\/jtwz-update/)
+  assert.doesNotMatch(installer, /NoNewPrivileges=true/)
+  assert.match(installer, /jtwz-domain/)
   assert.match(installer, /ENV_FILE="\$APP_DIR\/data\/config\.env"/)
   assert.match(installer, /LEGACY_ENV_FILE="\$APP_DIR\/\.env"/)
   assert.match(updater, /Ed25519 签名复核失败/)
+  assert.match(domainExecutor, /certbot --nginx --non-interactive/)
 
   console.log('stage6: RBAC, CSRF, request IDs, 2FA, sessions, login alerts, audit metadata and low-privilege deployment passed')
   if (serverError) assert.doesNotMatch(serverError, /Error|Exception/)

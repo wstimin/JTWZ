@@ -7,7 +7,12 @@ import { HttpError } from './http.js'
 
 export type StorageHead = { byteSize: number; sha256: string; contentType: string }
 
-export const objectStorageMode = config.storageProvider === 's3' ? 's3' : 'local'
+export let objectStorageMode: 's3' | 'local' = config.storageProvider === 's3' ? 's3' : 'local'
+
+export function refreshObjectStorageMode() {
+  objectStorageMode = config.storageProvider === 's3' ? 's3' : 'local'
+  return objectStorageMode
+}
 
 export function isStorageConfigured() {
   return objectStorageMode === 'local' || Boolean(config.s3Endpoint && config.s3Bucket && config.s3AccessKey && config.s3SecretKey)

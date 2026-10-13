@@ -228,7 +228,7 @@ export interface PlatformAlert {
 export interface PlatformIntegrations {
   storage: StorageStatus
   dns: { provider: 'manual' | 'cloudflare' | 'webhook'; configured: boolean }
-  certificate: { provider: 'manual' | 'cloudflare' | 'webhook'; configured: boolean }
+  certificate: { provider: 'manual' | 'certbot' | 'cloudflare' | 'webhook'; configured: boolean }
   notifications: { configured: boolean }
 }
 
@@ -258,5 +258,10 @@ export interface SystemUpdateStatus {
     publishedAt?: string
     notes?: string
   }
-  state?: Record<string, unknown> | null
+  state?: {
+    status?: string
+    detail?: string
+    version?: string
+    updatedAt?: string
+  } | null
 }

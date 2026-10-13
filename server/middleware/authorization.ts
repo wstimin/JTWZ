@@ -10,7 +10,7 @@ export function permissionForRequest(method: string, pathname: string): Permissi
   if (pathname.startsWith('/api/audit-logs')) return 'audit.read'
   if (pathname.startsWith('/api/analytics')) return 'analytics.read'
   if (pathname.startsWith('/api/tasks')) return method === 'GET' ? 'content.read' : 'tasks.manage'
-  if (pathname.startsWith('/api/admin/system/update') || pathname.startsWith('/api/admin/backups') || pathname === '/api/admin/access' || pathname.startsWith('/api/settings') || pathname === '/api/alerts/test') {
+  if (pathname.startsWith('/api/admin/system/') || pathname.startsWith('/api/admin/backups') || pathname === '/api/admin/access' || pathname.startsWith('/api/settings') || pathname === '/api/alerts/test') {
     return method === 'GET' ? 'content.read' : 'system.manage'
   }
   return method === 'GET' ? 'content.read' : 'content.manage'

@@ -53,14 +53,17 @@ const disabledAdminBasePaths = String(process.env.ADMIN_DISABLED_PATHS || '')
   .split(',')
   .map((value) => value.trim())
   .filter(Boolean)
-const allowedOrigins = [
+const configuredOrigins = [
   process.env.APP_ORIGIN,
   process.env.PUBLIC_APP_ORIGIN || 'http://127.0.0.1:4173',
   process.env.ADMIN_APP_ORIGIN || 'http://127.0.0.1:4174',
 ]
   .flatMap((value) => String(value || '').split(','))
   .map((value) => value.trim().replace(/\/$/, ''))
-  .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
+  .filter(Boolean)
+const allowedOrigins = configuredOrigins
+  .flatMap((value) => /^https?:\/\//i.test(value) ? [value, value.replace(/^http:/i, 'https:'), value.replace(/^https:/i, 'http:')] : [value])
+  .filter((value, index, values) => values.indexOf(value) === index)
 
 if (isProduction && (!configuredPassword || !configuredSecret)) {
   throw new Error('生产环境必须设置 ADMIN_PASSWORD 和 APP_SECRET，服务已拒绝启动。')
@@ -128,6 +131,8 @@ export const config = {
   updatePublicKey: updatePublicKey(),
   updateApplyCommand: process.env.UPDATE_APPLY_COMMAND || '',
   updateApplyArgsJson: process.env.UPDATE_APPLY_ARGS_JSON || '[]',
+  domainApplyCommand: process.env.DOMAIN_APPLY_COMMAND || '',
+  domainApplyArgsJson: process.env.DOMAIN_APPLY_ARGS_JSON || '[]',
   isProduction,
   cookieName: 'jtwz_session',
   adminBasePath,

@@ -25,10 +25,15 @@ EXISTING_INSTALL='false'
 UPDATE_PUBLIC_KEY_B64_VALUE=''
 UPDATE_APPLY_COMMAND_VALUE='/usr/local/bin/jtwz-update'
 UPDATE_APPLY_ARGS_JSON_VALUE='[]'
+DOMAIN_APPLY_COMMAND_VALUE=''
+DOMAIN_APPLY_ARGS_JSON_VALUE='[]'
+CERTIFICATE_PROVIDER_VALUE='manual'
 [[ -d "$SOURCE_DIR" ]] || SOURCE_DIR="$(cd -- "$PACKAGE_DIR/.." && pwd)"
 if [[ "$PANEL" != '1panel' ]]; then
   UPDATE_APPLY_COMMAND_VALUE='/usr/bin/sudo'
   UPDATE_APPLY_ARGS_JSON_VALUE='["/usr/local/bin/jtwz-update"]'
+  DOMAIN_APPLY_COMMAND_VALUE='/usr/bin/sudo'
+  DOMAIN_APPLY_ARGS_JSON_VALUE='["/usr/local/bin/jtwz-domain"]'
 else
   UPDATE_APPLY_COMMAND_VALUE=''
 fi
@@ -114,6 +119,22 @@ is_ip_address() {
   [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$1" == *:* ]]
 }
 
+install_reverse_proxy_tools() {
+  [[ "$PANEL" == 'standalone' ]] || return 0
+  is_ip_address "$PUBLIC_DOMAIN" && return 0
+  if command -v nginx >/dev/null && command -v certbot >/dev/null; then return 0; fi
+  say '检测到域名部署，正在安装 Nginx 与 Certbot。'
+  if command -v apt-get >/dev/null; then
+    apt-get update -y
+    apt-get install -y nginx certbot python3-certbot-nginx
+  elif command -v dnf >/dev/null; then
+    dnf install -y nginx certbot python3-certbot-nginx
+  else
+    die '无法自动安装 Nginx 与 Certbot，请先手动安装后重试。'
+  fi
+  systemctl enable --now nginx
+}
+
 select_access_mode() {
   local public_host admin_host
   public_host="$(origin_host "$PUBLIC_DOMAIN")"
@@ -132,6 +153,7 @@ select_access_mode() {
     [[ "$PANEL" == '1panel' ]] && API_BIND_HOST='0.0.0.0'
     PUBLIC_BASE_URL="http://$public_host"
     ADMIN_BASE_URL="http://$admin_host"
+    [[ "$PANEL" == 'standalone' ]] && CERTIFICATE_PROVIDER_VALUE='certbot'
   else
     API_BIND_HOST='0.0.0.0'
     PUBLIC_BASE_URL="http://$public_host:$API_PORT"
@@ -221,6 +243,9 @@ write_env() {
     [[ -z "$UPDATE_PUBLIC_KEY_B64_VALUE" ]] || upsert_env UPDATE_PUBLIC_KEY_B64 "$UPDATE_PUBLIC_KEY_B64_VALUE"
     upsert_env UPDATE_APPLY_COMMAND "$UPDATE_APPLY_COMMAND_VALUE"
     upsert_env UPDATE_APPLY_ARGS_JSON "$UPDATE_APPLY_ARGS_JSON_VALUE"
+    upsert_env DOMAIN_APPLY_COMMAND "$DOMAIN_APPLY_COMMAND_VALUE"
+    upsert_env DOMAIN_APPLY_ARGS_JSON "$DOMAIN_APPLY_ARGS_JSON_VALUE"
+    upsert_env CERTIFICATE_PROVIDER "$CERTIFICATE_PROVIDER_VALUE"
     chmod 600 "$ENV_FILE"
     return
   fi
@@ -252,6 +277,9 @@ UPDATE_MANIFEST_URL=https://github.com/wstimin/JTWZ/releases/latest/download/upd
 UPDATE_PUBLIC_KEY_B64=$UPDATE_PUBLIC_KEY_B64_VALUE
 UPDATE_APPLY_COMMAND=$UPDATE_APPLY_COMMAND_VALUE
 UPDATE_APPLY_ARGS_JSON=$UPDATE_APPLY_ARGS_JSON_VALUE
+DOMAIN_APPLY_COMMAND=$DOMAIN_APPLY_COMMAND_VALUE
+DOMAIN_APPLY_ARGS_JSON=$DOMAIN_APPLY_ARGS_JSON_VALUE
+CERTIFICATE_PROVIDER=$CERTIFICATE_PROVIDER_VALUE
 EOF
   chmod 600 "$ENV_FILE"
   if [[ "$PANEL" == '1panel' ]]; then ln -sfn "$ENV_FILE" "$APP_DIR/.env"; fi
@@ -321,7 +349,6 @@ RestartSec=5
 User=jtwz
 Group=jtwz
 UMask=0027
-NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
@@ -331,7 +358,7 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
-ReadWritePaths=$APP_DIR/data
+ReadWritePaths=$APP_DIR -/usr/local/bin -/etc/systemd/system -/etc/sudoers.d -/etc/nginx -/etc/letsencrypt -/var/lib/letsencrypt -/var/log/letsencrypt
 
 [Install]
 WantedBy=multi-user.target
@@ -344,19 +371,20 @@ EOF
 write_nginx() {
   [[ "$USE_REVERSE_PROXY" == 'true' && "$PANEL" != '1panel' ]] || return 0
   command -v nginx >/dev/null || die '当前配置需要 Nginx 反向代理，但服务器未安装 Nginx。'
-  local domain="${PUBLIC_DOMAIN:-_}" admin_domain="${ADMIN_DOMAIN:-$PUBLIC_DOMAIN}"
-  [[ "$domain" == *:* ]] && domain='_'
   mkdir -p /etc/nginx/conf.d
   cat > /etc/nginx/conf.d/jtwz.conf <<EOF
 server {
   listen 80;
-  server_name $domain $admin_domain;
+  listen [::]:80;
+  server_name _;
   client_max_body_size 2g;
-  location / { proxy_pass http://127.0.0.1:$API_PORT; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header X-Real-IP \$remote_addr; proxy_request_buffering off; }
+  location / { proxy_pass http://127.0.0.1:$API_PORT; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; proxy_set_header X-Real-IP \$remote_addr; proxy_request_buffering off; }
 }
 EOF
   nginx -t && systemctl reload nginx
-  say "Nginx 已配置：$domain（管理入口：$admin_domain$ADMIN_BASE_PATH/login）"
+  if ! is_ip_address "$PUBLIC_DOMAIN"; then /usr/local/bin/jtwz-domain route "$PUBLIC_DOMAIN"; fi
+  if [[ "$ADMIN_DOMAIN" != "$PUBLIC_DOMAIN" ]] && ! is_ip_address "$ADMIN_DOMAIN"; then /usr/local/bin/jtwz-domain route "$ADMIN_DOMAIN"; fi
+  say "Nginx 已配置：$PUBLIC_DOMAIN（管理入口：$ADMIN_DOMAIN$ADMIN_BASE_PATH/login）"
 }
 
 configure_firewall() {
@@ -407,11 +435,13 @@ main() {
   validate_public_address "$PUBLIC_DOMAIN"
   validate_public_address "$ADMIN_DOMAIN"
   ADMIN_BASE_PATH="$(normalize_admin_base_path "$ADMIN_BASE_PATH")"
+  install_reverse_proxy_tools
   select_access_mode
   install_application
-  if [[ -f "$SCRIPT_DIR/jtwz-update" && "$PANEL" != '1panel' ]]; then
+  if [[ -f "$SCRIPT_DIR/jtwz-update" && -f "$SCRIPT_DIR/jtwz-domain" && "$PANEL" != '1panel' ]]; then
     install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-update" /usr/local/bin/jtwz-update
-    printf 'jtwz ALL=(root) NOPASSWD: /usr/local/bin/jtwz-update *\n' > /etc/sudoers.d/jtwz-update
+    install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-domain" /usr/local/bin/jtwz-domain
+    printf 'jtwz ALL=(root) NOPASSWD: /usr/local/bin/jtwz-update *\njtwz ALL=(root) NOPASSWD: /usr/local/bin/jtwz-domain *\n' > /etc/sudoers.d/jtwz-update
     chmod 440 /etc/sudoers.d/jtwz-update
     visudo -cf /etc/sudoers.d/jtwz-update >/dev/null || die '更新执行器 sudo 权限校验失败。'
   fi

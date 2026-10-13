@@ -10,6 +10,7 @@ STAGING=''
 ROLLBACK=''
 TARGET_DIR="$APP_DIR"
 SWITCHED='false'
+CONFIG_ENV="$APP_DIR/data/config.env"
 
 say() { printf '\n[JTWZ Update] %s\n' "$*"; }
 die() { printf '[JTWZ Update][错误] %s\n' "$*" >&2; exit 1; }
@@ -46,10 +47,10 @@ NODE
 }
 
 if [[ -f "$APP_DIR/docker-compose.yml" && -d "$APP_DIR/app" ]]; then TARGET_DIR="$APP_DIR/app"; fi
-if [[ -f "$APP_DIR/.env" ]]; then API_PORT="$(grep -E '^API_PORT=' "$APP_DIR/.env" | tail -n 1 | cut -d= -f2- || true)"; fi
+[[ -f "$CONFIG_ENV" ]] || CONFIG_ENV="$APP_DIR/.env"
+if [[ -f "$CONFIG_ENV" ]]; then API_PORT="$(grep -E '^API_PORT=' "$CONFIG_ENV" | tail -n 1 | cut -d= -f2- || true)"; fi
 API_PORT="${API_PORT:-8787}"
 install -d -m 750 "$STATE_DIR"
-verify_signed_artifact
 
 write_state() {
   local status="$1" detail="$2" version="${3:-}"
@@ -62,12 +63,15 @@ fs.renameSync(`${target}.tmp`, target)
 NODE
 }
 
+verify_signed_artifact
+write_state 'preparing' '更新包签名复核通过，正在解压并安装依赖。'
+
 stop_service() {
   if [[ -f "$APP_DIR/docker-compose.yml" ]]; then (cd "$APP_DIR" && docker compose down); else systemctl stop "$SERVICE_NAME"; fi
 }
 
 start_service() {
-  if [[ -f "$APP_DIR/docker-compose.yml" ]]; then (cd "$APP_DIR" && docker compose up -d --build); else systemctl start "$SERVICE_NAME"; fi
+  if [[ -f "$APP_DIR/docker-compose.yml" ]]; then (cd "$APP_DIR" && docker compose up -d --build); else systemctl daemon-reload; systemctl start "$SERVICE_NAME"; fi
 }
 
 wait_for_health() {
@@ -87,6 +91,9 @@ restore_previous_code() {
     rm -rf "$TARGET_DIR/$item"
     [[ -e "$ROLLBACK/$item" ]] && cp -a "$ROLLBACK/$item" "$TARGET_DIR/"
   done
+  for item in jtwzctl jtwz-update jtwz-domain; do
+    [[ -f "$ROLLBACK/bin/$item" ]] && install -m 755 "$ROLLBACK/bin/$item" "/usr/local/bin/$item"
+  done
   start_service
   wait_for_health || true
   write_state 'rolled_back' '新版本健康检查失败，已恢复上一版程序。'
@@ -103,10 +110,11 @@ on_error() {
 trap on_error ERR
 
 STAGING="$(mktemp -d /tmp/jtwz-update-stage.XXXXXX)"
-ROLLBACK="$(mktemp -d /opt/jtwz-update-rollback.XXXXXX)"
+ROLLBACK="$(mktemp -d "$STATE_DIR/rollback.XXXXXX")"
 tar -xzf "$ARCHIVE" -C "$STAGING"
 SOURCE_APP="$(dirname "$(dirname "$(find "$STAGING" -path '*/app/dist-server/index.js' -type f -print -quit)")")"
 [[ -f "$SOURCE_APP/package.json" && -f "$SOURCE_APP/dist-server/index.js" && -d "$SOURCE_APP/dist" ]] || die '更新包结构不完整。'
+SOURCE_PACKAGE="$(dirname "$SOURCE_APP")"
 VERSION="$(node -e "process.stdout.write(require(process.argv[1]).version || '')" "$SOURCE_APP/package.json")"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || die '更新包版本号无效。'
 
@@ -118,6 +126,10 @@ npm --prefix "$NEXT" ci --omit=dev
 for item in package.json package-lock.json dist dist-server node_modules; do
   [[ -e "$TARGET_DIR/$item" ]] && cp -a "$TARGET_DIR/$item" "$ROLLBACK/"
 done
+mkdir -p "$ROLLBACK/bin"
+for item in jtwzctl jtwz-update jtwz-domain; do
+  [[ -f "/usr/local/bin/$item" ]] && cp -a "/usr/local/bin/$item" "$ROLLBACK/bin/$item"
+done
 
 write_state 'applying' "正在切换到 v$VERSION。" "$VERSION"
 stop_service
@@ -126,6 +138,18 @@ for item in package.json package-lock.json dist dist-server node_modules; do
   rm -rf "$TARGET_DIR/$item"
   cp -a "$NEXT/$item" "$TARGET_DIR/"
 done
+if [[ -f "$SOURCE_PACKAGE/installer/jtwzctl" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwzctl" /usr/local/bin/jtwzctl; fi
+if [[ -f "$SOURCE_PACKAGE/installer/jtwz-update" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwz-update" /usr/local/bin/jtwz-update; fi
+if [[ -f "$SOURCE_PACKAGE/installer/jtwz-domain" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwz-domain" /usr/local/bin/jtwz-domain; fi
+if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
+  sed -i '/^NoNewPrivileges=true$/d' "/etc/systemd/system/${SERVICE_NAME}.service"
+  sed -i "s#^ReadWritePaths=.*#ReadWritePaths=$APP_DIR -/usr/local/bin -/etc/systemd/system -/etc/sudoers.d -/etc/nginx -/etc/letsencrypt -/var/lib/letsencrypt -/var/log/letsencrypt#" "/etc/systemd/system/${SERVICE_NAME}.service"
+fi
+if id -u jtwz >/dev/null 2>&1 && [[ -x /usr/local/bin/jtwz-domain ]]; then
+  printf 'jtwz ALL=(root) NOPASSWD: /usr/local/bin/jtwz-update *\njtwz ALL=(root) NOPASSWD: /usr/local/bin/jtwz-domain *\n' > /etc/sudoers.d/jtwz-update
+  chmod 440 /etc/sudoers.d/jtwz-update
+  visudo -cf /etc/sudoers.d/jtwz-update >/dev/null
+fi
 start_service
 wait_for_health
 write_state 'applied' "v$VERSION 已安装，数据库迁移与健康检查通过。" "$VERSION"

@@ -134,15 +134,15 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
         preserveQuery,
         forceHttps,
       }
-      const result = editingId
-        ? await apiJson<{ domain: DomainRecord }>(`/api/domains/${encodeURIComponent(editingId)}`, 'PUT', payload)
-        : await apiJson<{ domain: DomainRecord }>('/api/domains', 'POST', payload)
+      const result: { domain: DomainRecord; routeWarning?: string } = editingId
+        ? await apiJson<{ domain: DomainRecord; routeWarning?: string }>(`/api/domains/${encodeURIComponent(editingId)}`, 'PUT', payload)
+        : await apiJson<{ domain: DomainRecord; routeWarning?: string }>('/api/domains', 'POST', payload)
       setDomains((current) => editingId
         ? current.map((item) => item.id === editingId ? result.domain : item)
         : [result.domain, ...current.filter((item) => item.id !== result.domain.id)])
       setOpen(false)
       resetForm()
-      notify(editingId ? '域名配置已更新' : '域名已保存，下一步请配置 DNS 验证')
+      notify(result.routeWarning || (editingId ? '域名配置已更新' : '域名入口已配置，下一步请完成 DNS 验证'), result.routeWarning ? 'info' : 'success')
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : '域名保存失败', 'info')
     } finally {

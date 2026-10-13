@@ -8,13 +8,13 @@ import { config, normalizeAdminBasePath } from './config.js'
 import { audit, db, isHttpUrl, isValidHostname, mapCertificate, mapDomain, mapPackage, mapSettings, mapSite, mapSoftware, mapSoftwareVersion, normalizeHostname, recordEvent } from './db.js'
 import { clientIp, HttpError, parseCookies, readJson, sendHtml, sendJson } from './http.js'
 import { extractStaticSite } from './sitePublisher.js'
-import { completeMultipartUpload, completeStorageUpload, createMultipartPartUpload, createMultipartUpload, createStorageDownload, createStorageUpload, isStorageConfigured, localFilePath, objectStorageMode, removeObject, uploadLocal } from './objectStorage.js'
+import { completeMultipartUpload, completeStorageUpload, createMultipartPartUpload, createMultipartUpload, createStorageDownload, createStorageUpload, isStorageConfigured, localFilePath, objectStorageMode, refreshObjectStorageMode, removeObject, uploadLocal } from './objectStorage.js'
 import { dnsProviderStatus, publishVerificationRecord } from './dnsProvider.js'
-import { certificateProviderStatus, deleteCertificate, issueCertificate, type CertificateProviderResult } from './certificateProvider.js'
+import { certificateProviderStatus, configureDomainRoute, deleteCertificate, domainAutomationConfigured, issueCertificate, removeDomainRoute, type CertificateProviderResult } from './certificateProvider.js'
 import { backupFilePath, createBackup, listBackups, restoreBackupWithRollback, startBackupScheduler } from './backup.js'
 import { notificationsConfigured, notifyAlert } from './notifications.js'
 import { formatBytes, removeStoredFile, safeStoragePath, signedDownloadPath, signedStorageUpload, verifyDownloadSignature, verifyStorageUpload, writeRequestToFile } from './storage.js'
-import { checkForUpdate, installUpdate } from './updateService.js'
+import { checkForUpdate, getUpdateState, installUpdate } from './updateService.js'
 import { cancelTask, createTask, findLatestTask, getTask, listTasks, recoverInterruptedTasks, updateTask } from './tasks.js'
 import { applySecurityHeaders, checkOrigin, originAllowed, requestOrigin, requireCsrf, stateMethods } from './middleware/security.js'
 import { runWithRequestContext } from './middleware/requestContext.js'
@@ -65,6 +65,38 @@ function writeEnvironmentValues(values: Record<string, string>) {
     writeFileSync(envPath, nextContent, { mode: 0o600 })
     rmSync(tempPath, { force: true })
   }
+}
+
+function systemConfiguration() {
+  return {
+    storageProvider: objectStorageMode,
+    s3Endpoint: config.s3Endpoint,
+    s3Region: config.s3Region,
+    s3Bucket: config.s3Bucket,
+    s3PublicBaseUrl: config.s3PublicBaseUrl,
+    s3AccessKeyConfigured: Boolean(config.s3AccessKey),
+    s3SecretKeyConfigured: Boolean(config.s3SecretKey),
+    dnsProvider: config.dnsProvider,
+    certificateProvider: config.certificateProvider,
+    cloudflareApiTokenConfigured: Boolean(config.cloudflareApiToken),
+    dnsWebhookUrl: config.dnsWebhookUrl,
+    dnsWebhookSecretConfigured: Boolean(config.dnsWebhookSecret),
+    alertWebhookUrl: config.alertWebhookUrl,
+    alertWebhookSecretConfigured: Boolean(config.alertWebhookSecret),
+    domainAutomationConfigured: domainAutomationConfigured(),
+  }
+}
+
+function validatedOptionalUrl(value: unknown, label: string) {
+  const normalized = String(value || '').trim()
+  if (normalized && !isHttpUrl(normalized)) throw new HttpError(400, `${label}必须是有效的 http 或 https 地址`)
+  return normalized.replace(/\/$/, '')
+}
+
+function configuredSecret(body: Record<string, unknown>, field: string, clearField: string, current: string) {
+  if (body[clearField] === true) return ''
+  const value = String(body[field] || '').trim()
+  return value || current
 }
 
 function requireAdmin(request: AuthenticatedRequest) {
@@ -778,6 +810,57 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     sendJson(response, 200, { update: await checkedSystemUpdate() })
     return
   }
+  if (method === 'GET' && url.pathname === '/api/admin/system/update/state') {
+    sendJson(response, 200, { state: getUpdateState(), currentVersion: config.systemVersion, checkedAt: new Date().toISOString() })
+    return
+  }
+  if (method === 'GET' && url.pathname === '/api/admin/system/config') {
+    sendJson(response, 200, { config: systemConfiguration() })
+    return
+  }
+  if (method === 'PUT' && url.pathname === '/api/admin/system/config') {
+    const body = await readJson<Record<string, unknown>>(request)
+    const storageProvider = String(body.storageProvider ?? config.storageProvider).toLowerCase()
+    const dnsProvider = String(body.dnsProvider ?? config.dnsProvider).toLowerCase()
+    const certificateProvider = String(body.certificateProvider ?? config.certificateProvider).toLowerCase()
+    if (!['local', 's3'].includes(storageProvider)) throw new HttpError(400, '存储方式仅支持 local 或 s3')
+    if (!['manual', 'cloudflare', 'webhook'].includes(dnsProvider)) throw new HttpError(400, 'DNS 服务商配置无效')
+    if (!['manual', 'certbot', 'cloudflare', 'webhook'].includes(certificateProvider)) throw new HttpError(400, '证书服务商配置无效')
+    const next = {
+      storageProvider,
+      s3Endpoint: validatedOptionalUrl(body.s3Endpoint ?? config.s3Endpoint, 'S3 Endpoint'),
+      s3Region: String(body.s3Region ?? config.s3Region).trim() || 'auto',
+      s3Bucket: String(body.s3Bucket ?? config.s3Bucket).trim(),
+      s3AccessKey: configuredSecret(body, 's3AccessKey', 'clearS3AccessKey', config.s3AccessKey),
+      s3SecretKey: configuredSecret(body, 's3SecretKey', 'clearS3SecretKey', config.s3SecretKey),
+      s3PublicBaseUrl: validatedOptionalUrl(body.s3PublicBaseUrl ?? config.s3PublicBaseUrl, 'S3 公开地址'),
+      dnsProvider,
+      certificateProvider,
+      cloudflareApiToken: configuredSecret(body, 'cloudflareApiToken', 'clearCloudflareApiToken', config.cloudflareApiToken),
+      dnsWebhookUrl: validatedOptionalUrl(body.dnsWebhookUrl ?? config.dnsWebhookUrl, 'DNS Webhook 地址'),
+      dnsWebhookSecret: configuredSecret(body, 'dnsWebhookSecret', 'clearDnsWebhookSecret', config.dnsWebhookSecret),
+      alertWebhookUrl: validatedOptionalUrl(body.alertWebhookUrl ?? config.alertWebhookUrl, '告警 Webhook 地址'),
+      alertWebhookSecret: configuredSecret(body, 'alertWebhookSecret', 'clearAlertWebhookSecret', config.alertWebhookSecret),
+    }
+    if (storageProvider === 's3' && (!next.s3Endpoint || !next.s3Bucket || !next.s3AccessKey || !next.s3SecretKey)) throw new HttpError(400, '启用 S3 前请完整填写 Endpoint、Bucket、Access Key 和 Secret Key')
+    if (dnsProvider === 'cloudflare' && !next.cloudflareApiToken) throw new HttpError(400, '启用 Cloudflare DNS 前请填写 API Token')
+    if (dnsProvider === 'webhook' && !next.dnsWebhookUrl) throw new HttpError(400, '启用 DNS Webhook 前请填写 Webhook 地址')
+    if (certificateProvider === 'cloudflare' && !next.cloudflareApiToken) throw new HttpError(400, '使用 Cloudflare 证书前请填写 API Token')
+    if (certificateProvider === 'webhook' && !next.dnsWebhookUrl) throw new HttpError(400, '使用 Webhook 证书服务前请填写 Webhook 地址')
+    if (certificateProvider === 'certbot' && !domainAutomationConfigured()) throw new HttpError(409, '当前安装未配置本机 Certbot 执行器，请重新运行一键安装脚本完成升级')
+    writeEnvironmentValues({
+      STORAGE_PROVIDER: next.storageProvider, S3_ENDPOINT: next.s3Endpoint, S3_REGION: next.s3Region, S3_BUCKET: next.s3Bucket,
+      S3_ACCESS_KEY: next.s3AccessKey, S3_SECRET_KEY: next.s3SecretKey, S3_PUBLIC_BASE_URL: next.s3PublicBaseUrl,
+      DNS_PROVIDER: next.dnsProvider, CERTIFICATE_PROVIDER: next.certificateProvider, CLOUDFLARE_API_TOKEN: next.cloudflareApiToken,
+      DNS_WEBHOOK_URL: next.dnsWebhookUrl, DNS_WEBHOOK_SECRET: next.dnsWebhookSecret,
+      ALERT_WEBHOOK_URL: next.alertWebhookUrl, ALERT_WEBHOOK_SECRET: next.alertWebhookSecret,
+    })
+    Object.assign(config, next)
+    refreshObjectStorageMode()
+    audit(admin.id, 'update', 'system_config', 'runtime', `${next.storageProvider} / ${next.dnsProvider} / ${next.certificateProvider}`)
+    sendJson(response, 200, { config: systemConfiguration() })
+    return
+  }
   if (method === 'POST' && url.pathname === '/api/settings/logo') {
     const fileName = safeFileName(url.searchParams.get('fileName') || '')
     const extension = extname(fileName).toLowerCase()
@@ -1022,8 +1105,15 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
       if (String(error).includes('UNIQUE')) throw new HttpError(409, '该域名已经存在')
       throw error
     }
+    let routeWarning = ''
+    try {
+      await configureDomainRoute(hostname)
+    } catch (error) {
+      routeWarning = error instanceof Error ? error.message : '服务器入口配置失败'
+      audit(admin.id, 'domain_route_failed', 'domain', id, `${hostname} / ${routeWarning}`)
+    }
     audit(admin.id, 'create', 'domain', id, hostname)
-    sendJson(response, 201, { domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(id) as Row) })
+    sendJson(response, 201, { domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(id) as Row), routeWarning })
     return
   }
 
@@ -1056,6 +1146,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const id = decodeURIComponent(domainMatch[1])
     const current = db.prepare('SELECT hostname FROM domains WHERE id = ?').get(id) as Row | undefined
     if (!current) throw new HttpError(404, '域名不存在')
+    await removeDomainRoute(String(current.hostname))
     db.prepare('DELETE FROM domains WHERE id = ?').run(id)
     audit(admin.id, 'delete', 'domain', id, String(current.hostname))
     sendJson(response, 200, { ok: true })
@@ -1126,7 +1217,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const id = decodeURIComponent(certificateMatch[1])
     const current = db.prepare('SELECT certificates.*, domains.hostname FROM certificates JOIN domains ON domains.id = certificates.domain_id WHERE certificates.id = ?').get(id) as Row | undefined
     if (!current) throw new HttpError(404, '证书记录不存在')
-    await deleteCertificate(String(current.hostname), String(current.external_ref || ''))
+    await deleteCertificate(String(current.hostname), String(current.external_ref || ''), String(current.provider || ''))
     db.prepare('DELETE FROM certificates WHERE id = ?').run(id)
     syncDomainCertificateStatus(String(current.domain_id))
     audit(admin.id, 'certificate_delete', 'certificate', id, `${String(current.hostname)} / ${String(current.issuer)}`)
@@ -1879,7 +1970,7 @@ function tryDomainRuntime(request: IncomingMessage, response: ServerResponse, ur
   if (!row) return false
   const domain = mapDomain(row)
 
-  if (domain.forceHttps && config.isProduction && request.headers['x-forwarded-proto'] !== 'https') {
+  if (domain.forceHttps && domain.certificateStatus === 'active' && config.isProduction && request.headers['x-forwarded-proto'] !== 'https') {
     response.writeHead(308, { Location: `https://${hostname}${url.pathname}${url.search}` })
     response.end()
     return true

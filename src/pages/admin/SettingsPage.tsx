@@ -1,5 +1,5 @@
 import { Bell, Check, Database, Download, Palette, RefreshCw, Save, ShieldCheck, Trash2, UploadCloud } from 'lucide-react'
-import { ChangeEvent, FormEvent, useEffect, useState } from 'react'
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import type { Dispatch, SetStateAction } from 'react'
 import type { BrandSettings, PlatformIntegrations, SystemHealth, SystemUpdateStatus } from '../../types'
@@ -12,6 +12,35 @@ interface AdminAccess {
   dashboardPath: string
   loginPath: string
   loginUrl: string
+}
+
+interface UpdateProgress {
+  value: number
+  label: string
+  status: 'running' | 'success' | 'error'
+}
+
+interface SystemConfiguration {
+  storageProvider: 'local' | 's3'
+  s3Endpoint: string
+  s3Region: string
+  s3Bucket: string
+  s3PublicBaseUrl: string
+  s3AccessKeyConfigured: boolean
+  s3SecretKeyConfigured: boolean
+  dnsProvider: 'manual' | 'cloudflare' | 'webhook'
+  certificateProvider: 'manual' | 'certbot' | 'cloudflare' | 'webhook'
+  cloudflareApiTokenConfigured: boolean
+  dnsWebhookUrl: string
+  dnsWebhookSecretConfigured: boolean
+  alertWebhookUrl: string
+  alertWebhookSecretConfigured: boolean
+  domainAutomationConfigured: boolean
+  s3AccessKey?: string
+  s3SecretKey?: string
+  cloudflareApiToken?: string
+  dnsWebhookSecret?: string
+  alertWebhookSecret?: string
 }
 
 export function SettingsPage({ settings, setSettings, integrations }: { settings: BrandSettings; setSettings: Dispatch<SetStateAction<BrandSettings>>; integrations: PlatformIntegrations }) {
@@ -32,6 +61,10 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
   const [healthLoading, setHealthLoading] = useState(false)
   const [systemUpdate, setSystemUpdate] = useState<SystemUpdateStatus | null>(null)
   const [updateLoading, setUpdateLoading] = useState(false)
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null)
+  const updatePolling = useRef(false)
+  const [systemConfig, setSystemConfig] = useState<SystemConfiguration | null>(null)
+  const [systemConfigSaving, setSystemConfigSaving] = useState(false)
   const [logoLoading, setLogoLoading] = useState(false)
   const { notify, confirm } = useToast()
   const sectionParam = searchParams.get('section')
@@ -42,8 +75,13 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
   useEffect(() => {
     void apiRequest<{ backups: Array<{ fileName: string; byteSize: number; createdAt: string }> }>('/api/admin/backups').then((result) => setBackups(result.backups)).catch(() => undefined)
     void refreshHealth()
-    void apiRequest<{ update: SystemUpdateStatus }>('/api/admin/system/update').then((result) => setSystemUpdate(result.update)).catch(() => undefined)
+    void apiRequest<{ update: SystemUpdateStatus }>('/api/admin/system/update').then((result) => {
+      setSystemUpdate(result.update)
+      const state = result.update.state?.status
+      if (result.update.applyConfigured && (state === 'staged' || state === 'preparing' || state === 'applying')) void pollUpdateState(result.update.latestVersion)
+    }).catch(() => undefined)
     void apiRequest<{ access: AdminAccess }>('/api/admin/access').then((result) => { setAdminAccess(result.access); setAdminBasePathDraft(result.access.adminBasePath) }).catch(() => undefined)
+    void apiRequest<{ config: SystemConfiguration }>('/api/admin/system/config').then((result) => setSystemConfig(result.config)).catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -74,6 +112,21 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
       notify(reason instanceof Error ? reason.message : '设置保存失败', 'info')
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function saveSystemConfiguration(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!systemConfig) return
+    setSystemConfigSaving(true)
+    try {
+      const result = await apiJson<{ config: SystemConfiguration }>('/api/admin/system/config', 'PUT', systemConfig)
+      setSystemConfig(result.config)
+      notify('系统连接配置已保存并立即生效')
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : '系统连接配置保存失败', 'info')
+    } finally {
+      setSystemConfigSaving(false)
     }
   }
 
@@ -131,6 +184,7 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
 
   async function checkSystemUpdate() {
     setUpdateLoading(true)
+    setUpdateProgress(null)
     try {
       const result = await apiJson<{ update: SystemUpdateStatus }>('/api/admin/system/update/check', 'POST')
       setSystemUpdate(result.update)
@@ -142,16 +196,72 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
     }
   }
 
+  async function pollUpdateState(targetVersion?: string) {
+    if (updatePolling.current) return
+    updatePolling.current = true
+    setUpdateLoading(true)
+    const startedAt = Date.now()
+    try {
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        if (attempt > 0) await new Promise((resolve) => window.setTimeout(resolve, 2000))
+        try {
+          const result = await apiRequest<{ state: SystemUpdateStatus['state']; currentVersion: string }>('/api/admin/system/update/state')
+          const state = result.state
+          const status = String(state?.status || 'staged')
+          if (status === 'applied' || (targetVersion && result.currentVersion === targetVersion && status !== 'failed' && status !== 'rolled_back')) {
+            setUpdateProgress({ value: 100, label: `v${result.currentVersion} 更新完成，正在刷新页面…`, status: 'success' })
+            notify('系统更新完成，页面即将刷新', 'success')
+            window.setTimeout(() => window.location.reload(), 1200)
+            return
+          }
+          if (status === 'failed' || status === 'rolled_back' || status === 'executor_failed') {
+            const message = state?.detail || '更新执行失败，系统已回滚'
+            setUpdateProgress({ value: 100, label: message, status: 'error' })
+            notify(message, 'info')
+            return
+          }
+          const progress = status === 'applying' ? 82 : status === 'preparing' ? 66 : status === 'staged' ? 52 : 30
+          const fallbackLabel = status === 'applying' ? '正在切换程序并执行健康检查…' : status === 'preparing' ? '签名复核通过，正在解压并安装依赖…' : '更新包已校验，等待执行器开始…'
+          setUpdateProgress({ value: progress, label: state?.detail || fallbackLabel, status: 'running' })
+        } catch (reason) {
+          if (attempt < 10) {
+            setUpdateProgress({ value: 68, label: '服务正在重启，等待更新结果…', status: 'running' })
+            continue
+          }
+          throw reason
+        }
+      }
+      throw new Error(`更新超过 ${(Date.now() - startedAt) / 1000 > 90 ? '90 秒' : '预期时间'}，请刷新页面查看状态`)
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : '更新状态读取失败'
+      setUpdateProgress({ value: 100, label: message, status: 'error' })
+      notify(message, 'info')
+    } finally {
+      updatePolling.current = false
+      setUpdateLoading(false)
+    }
+  }
+
   async function installSystemUpdate() {
     if (!systemUpdate?.updateAvailable || !await confirm({ title: '安装系统更新', message: `即将备份当前网站并更新到 ${systemUpdate.latestVersion}，确定继续吗？`, confirmLabel: '备份并更新', tone: 'warning' })) return
     setUpdateLoading(true)
+    setUpdateProgress({ value: 12, label: '正在创建回滚备份并下载更新包…', status: 'running' })
     try {
-      const result = await apiJson<{ update: { message: string; applyStarted: boolean } }>('/api/admin/system/update/install', 'POST')
-      notify(result.update.message, result.update.applyStarted ? 'success' : 'info')
+      const result = await apiJson<{ update: { message: string; applyStarted: boolean; status?: string; version?: string } }>('/api/admin/system/update/install', 'POST')
+      if (!result.update.applyStarted) {
+        setUpdateProgress({ value: 100, label: result.update.message, status: 'success' })
+        notify(result.update.message, 'info')
+        return
+      }
+      setUpdateProgress({ value: 52, label: '更新包已下载并校验，正在启动更新执行器…', status: 'running' })
+      notify('更新已开始，正在备份并切换服务', 'info')
+      await pollUpdateState(result.update.version || systemUpdate.latestVersion)
     } catch (reason) {
-      notify(reason instanceof Error ? reason.message : '系统更新失败', 'info')
+      const message = reason instanceof Error ? reason.message : '系统更新失败'
+      setUpdateProgress({ value: 100, label: message, status: 'error' })
+      notify(message, 'info')
     } finally {
-      setUpdateLoading(false)
+      if (!updatePolling.current) setUpdateLoading(false)
     }
   }
 
@@ -223,10 +333,10 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
   }
 
   const integrationItems = [
-    { label: '对象存储', value: integrations.storage.provider.toUpperCase(), configured: integrations.storage.configured, detail: integrations.storage.directUpload ? '支持浏览器直传' : '仅服务器存储' },
-    { label: 'DNS 服务商', value: integrations.dns.provider, configured: integrations.dns.configured, detail: integrations.dns.configured ? '支持自动写入 TXT' : '使用手动验证' },
-    { label: 'HTTPS / 证书', value: integrations.certificate.provider, configured: integrations.certificate.configured, detail: integrations.certificate.configured ? '支持自动签发或委托' : '等待服务商配置' },
-    { label: '告警通知', value: integrations.notifications.configured ? 'Webhook' : '未配置', configured: integrations.notifications.configured, detail: integrations.notifications.configured ? '支持签名通知' : '仅保留站内告警' },
+    { label: '对象存储', value: (systemConfig?.storageProvider || integrations.storage.provider).toUpperCase(), configured: systemConfig ? systemConfig.storageProvider === 'local' || (systemConfig.s3AccessKeyConfigured && systemConfig.s3SecretKeyConfigured) : integrations.storage.configured, detail: integrations.storage.directUpload ? '支持浏览器直传' : '仅服务器存储' },
+    { label: 'DNS 服务商', value: systemConfig?.dnsProvider || integrations.dns.provider, configured: systemConfig ? systemConfig.dnsProvider === 'cloudflare' ? systemConfig.cloudflareApiTokenConfigured : systemConfig.dnsProvider === 'webhook' ? Boolean(systemConfig.dnsWebhookUrl) : false : integrations.dns.configured, detail: (systemConfig?.dnsProvider || integrations.dns.provider) === 'manual' ? '使用手动验证' : '支持自动写入 TXT' },
+    { label: 'HTTPS / 证书', value: systemConfig?.certificateProvider || integrations.certificate.provider, configured: systemConfig ? systemConfig.certificateProvider === 'certbot' ? systemConfig.domainAutomationConfigured : systemConfig.certificateProvider === 'cloudflare' ? systemConfig.cloudflareApiTokenConfigured : systemConfig.certificateProvider === 'webhook' ? Boolean(systemConfig.dnsWebhookUrl) : false : integrations.certificate.configured, detail: (systemConfig?.certificateProvider || integrations.certificate.provider) === 'manual' ? '等待服务商配置' : '支持自动签发或委托' },
+    { label: '告警通知', value: (systemConfig?.alertWebhookUrl || integrations.notifications.configured) ? 'Webhook' : '未配置', configured: systemConfig ? Boolean(systemConfig.alertWebhookUrl) : integrations.notifications.configured, detail: (systemConfig?.alertWebhookUrl || integrations.notifications.configured) ? '支持签名通知' : '仅保留站内告警' },
   ]
   async function selectSection(section: typeof activeSection) {
     if (section === activeSection) return
@@ -291,18 +401,35 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
         </section> : null}
 
         {activeSection === 'storage' ? <section id="settings-storage" className="panel settings-panel">
-          <div className="settings-heading"><div><span className="overline">Infrastructure</span><h2>存储、DNS 与证书</h2><p>这里只显示适配器状态，敏感密钥通过服务器环境变量配置，不会返回浏览器。</p></div></div>
-          <div className="integration-grid">{integrationItems.filter((item) => item.label !== '告警通知').map((item) => <article className="integration-card" key={item.label}><div><strong>{item.label}</strong><span>{item.value}</span></div><small>{item.detail}</small><em data-status={item.configured ? 'available' : 'paused'}>{item.configured ? '已配置' : '未配置'}</em></article>)}</div>
-          <div className="settings-saved-note"><ShieldCheck /> 生产环境必须使用对象存储直传；修改连接参数后需要由运维安全重启服务。</div>
+          <form className="form-stack" onSubmit={saveSystemConfiguration}>
+            <div className="settings-heading"><div><span className="overline">Infrastructure</span><h2>存储、DNS 与证书</h2><p>在这里直接配置运行连接；密钥只写入服务器配置文件，不会返回浏览器。</p></div><button className="button button--primary" type="submit" disabled={!systemConfig || systemConfigSaving}><Save /> {systemConfigSaving ? '保存中…' : '保存连接配置'}</button></div>
+            <div className="integration-grid">{integrationItems.filter((item) => item.label !== '告警通知').map((item) => <article className="integration-card" key={item.label}><div><strong>{item.label}</strong><span>{item.value}</span></div><small>{item.detail}</small><em data-status={item.configured ? 'available' : 'paused'}>{item.configured ? '已配置' : '未配置'}</em></article>)}</div>
+            {systemConfig ? <>
+              <div className="settings-section"><h3>安装包存储</h3>
+                <div className="field-grid"><label className="field"><span>存储方式</span><select value={systemConfig.storageProvider} onChange={(event) => setSystemConfig({ ...systemConfig, storageProvider: event.target.value as 'local' | 's3' })}><option value="local">服务器本地存储</option><option value="s3">S3 兼容对象存储</option></select></label>{systemConfig.storageProvider === 's3' ? <label className="field"><span>区域</span><input value={systemConfig.s3Region} onChange={(event) => setSystemConfig({ ...systemConfig, s3Region: event.target.value })} placeholder="auto / us-east-1" /></label> : null}</div>
+                {systemConfig.storageProvider === 's3' ? <><div className="field-grid"><label className="field"><span>S3 Endpoint</span><input value={systemConfig.s3Endpoint} onChange={(event) => setSystemConfig({ ...systemConfig, s3Endpoint: event.target.value })} placeholder="https://s3.example.com" required /></label><label className="field"><span>Bucket</span><input value={systemConfig.s3Bucket} onChange={(event) => setSystemConfig({ ...systemConfig, s3Bucket: event.target.value })} required /></label></div><div className="field-grid"><label className="field"><span>Access Key</span><input value={systemConfig.s3AccessKey || ''} onChange={(event) => setSystemConfig({ ...systemConfig, s3AccessKey: event.target.value })} placeholder={systemConfig.s3AccessKeyConfigured ? '已配置；留空保持不变' : '请输入 Access Key'} /></label><label className="field"><span>Secret Key</span><input type="password" value={systemConfig.s3SecretKey || ''} onChange={(event) => setSystemConfig({ ...systemConfig, s3SecretKey: event.target.value })} placeholder={systemConfig.s3SecretKeyConfigured ? '已配置；留空保持不变' : '请输入 Secret Key'} /></label></div><label className="field"><span>公开访问地址（可选）</span><input value={systemConfig.s3PublicBaseUrl} onChange={(event) => setSystemConfig({ ...systemConfig, s3PublicBaseUrl: event.target.value })} placeholder="https://cdn.example.com" /></label></> : null}
+              </div>
+              <div className="settings-section"><h3>域名、DNS 与 HTTPS</h3>
+                <div className="field-grid"><label className="field"><span>DNS 验证方式</span><select value={systemConfig.dnsProvider} onChange={(event) => setSystemConfig({ ...systemConfig, dnsProvider: event.target.value as SystemConfiguration['dnsProvider'] })}><option value="manual">手动添加 TXT</option><option value="cloudflare">Cloudflare API</option><option value="webhook">自定义 Webhook</option></select></label><label className="field"><span>证书签发方式</span><select value={systemConfig.certificateProvider} onChange={(event) => setSystemConfig({ ...systemConfig, certificateProvider: event.target.value as SystemConfiguration['certificateProvider'] })}><option value="certbot" disabled={!systemConfig.domainAutomationConfigured}>本机 Certbot 自动签发</option><option value="cloudflare">Cloudflare Universal SSL</option><option value="webhook">自定义 Webhook</option><option value="manual">手动登记证书</option></select><small>{systemConfig.domainAutomationConfigured ? '域名验证后可自动配置 Nginx 并申请证书。' : '重新运行新版一键安装脚本后可启用本机 Certbot。'}</small></label></div>
+                {(systemConfig.dnsProvider === 'cloudflare' || systemConfig.certificateProvider === 'cloudflare') ? <label className="field"><span>Cloudflare API Token</span><input type="password" value={systemConfig.cloudflareApiToken || ''} onChange={(event) => setSystemConfig({ ...systemConfig, cloudflareApiToken: event.target.value })} placeholder={systemConfig.cloudflareApiTokenConfigured ? '已配置；留空保持不变' : '请输入具有 Zone 权限的 Token'} /></label> : null}
+                {(systemConfig.dnsProvider === 'webhook' || systemConfig.certificateProvider === 'webhook') ? <div className="field-grid"><label className="field"><span>DNS / 证书 Webhook</span><input value={systemConfig.dnsWebhookUrl} onChange={(event) => setSystemConfig({ ...systemConfig, dnsWebhookUrl: event.target.value })} placeholder="https://ops.example.com/jtwz" required /></label><label className="field"><span>Webhook 密钥</span><input type="password" value={systemConfig.dnsWebhookSecret || ''} onChange={(event) => setSystemConfig({ ...systemConfig, dnsWebhookSecret: event.target.value })} placeholder={systemConfig.dnsWebhookSecretConfigured ? '已配置；留空保持不变' : '可选签名密钥'} /></label></div> : null}
+              </div>
+            </> : <div className="settings-saved-note">正在读取服务器连接配置…</div>}
+            <div className="settings-saved-note"><ShieldCheck /> 保存后新请求立即使用最新配置；已上传文件不会被自动迁移到另一种存储。</div>
+          </form>
         </section> : null}
 
         {activeSection === 'notifications' ? <section id="settings-notifications" className="panel settings-panel">
-          <div className="settings-heading"><div><span className="overline">Notifications</span><h2>通知与告警</h2><p>测试签名 Webhook 告警通道，未配置时系统仍保留站内异常记录。</p></div><button className="button button--secondary" type="button" onClick={() => void testNotifications()}><Bell /> 测试告警通道</button></div>
-          <div className="integration-grid">{integrationItems.filter((item) => item.label === '告警通知').map((item) => <article className="integration-card" key={item.label}><div><strong>{item.label}</strong><span>{item.value}</span></div><small>{item.detail}</small><em data-status={item.configured ? 'available' : 'paused'}>{item.configured ? '已配置' : '未配置'}</em></article>)}</div>
+          <form className="form-stack" onSubmit={saveSystemConfiguration}>
+            <div className="settings-heading"><div><span className="overline">Notifications</span><h2>通知与告警</h2><p>配置签名 Webhook 告警通道，未配置时系统仍保留站内异常记录。</p></div><div className="toolbar-actions"><button className="button button--secondary" type="button" onClick={() => void testNotifications()}><Bell /> 测试告警</button><button className="button button--primary" type="submit" disabled={!systemConfig || systemConfigSaving}><Save /> {systemConfigSaving ? '保存中…' : '保存配置'}</button></div></div>
+            <div className="integration-grid">{integrationItems.filter((item) => item.label === '告警通知').map((item) => <article className="integration-card" key={item.label}><div><strong>{item.label}</strong><span>{item.value}</span></div><small>{item.detail}</small><em data-status={item.configured ? 'available' : 'paused'}>{item.configured ? '已配置' : '未配置'}</em></article>)}</div>
+            {systemConfig ? <div className="settings-section"><div className="field-grid"><label className="field"><span>告警 Webhook 地址</span><input value={systemConfig.alertWebhookUrl} onChange={(event) => setSystemConfig({ ...systemConfig, alertWebhookUrl: event.target.value })} placeholder="https://hooks.example.com/jtwz" /></label><label className="field"><span>签名密钥</span><input type="password" value={systemConfig.alertWebhookSecret || ''} onChange={(event) => setSystemConfig({ ...systemConfig, alertWebhookSecret: event.target.value })} placeholder={systemConfig.alertWebhookSecretConfigured ? '已配置；留空保持不变' : '可选；默认使用系统密钥'} /></label></div></div> : <div className="settings-saved-note">正在读取通知配置…</div>}
+          </form>
         </section> : null}
 
         {activeSection === 'maintenance' ? <section id="settings-maintenance" className="panel settings-panel">
           <div className="settings-heading"><div><span className="overline">System update</span><h2>系统版本与更新</h2><p>{systemUpdate?.configured ? `当前版本 ${systemUpdate.currentVersion}，${systemUpdate.updateAvailable ? `已验证签名，可更新到 ${systemUpdate.latestVersion}` : '已是最新版本'}。` : `当前版本 ${systemUpdate?.currentVersion || '读取中'}；${systemUpdate?.configurationError || '需要配置更新清单和 Ed25519 公钥'}。`}</p></div><div className="toolbar-actions"><button className="button button--secondary" type="button" onClick={() => void checkSystemUpdate()} disabled={updateLoading}><RefreshCw className={updateLoading ? 'is-spinning' : undefined} /> {updateLoading ? '检测中…' : '检测新版本'}</button>{systemUpdate?.updateAvailable ? <button className="button button--primary" type="button" onClick={() => void installSystemUpdate()} disabled={updateLoading}><Download /> 备份并更新</button> : null}</div></div>
+          {updateProgress ? <div className={`system-update-progress is-${updateProgress.status}`} role="status" aria-live="polite"><div className="system-update-progress__meta"><strong>{updateProgress.label}</strong><span>{updateProgress.value}%</span></div><div className="system-update-progress__track"><i style={{ width: `${updateProgress.value}%` }} /></div><small>{updateProgress.status === 'running' ? '请保持当前页面打开，服务重启期间页面可能短暂无法访问。' : updateProgress.status === 'success' ? '更新完成后页面会自动重新加载。' : '请根据提示处理后重新检测更新。'}</small></div> : null}
           {systemUpdate?.manifest?.notes ? <div className="settings-saved-note"><strong>v{systemUpdate.latestVersion}</strong><span>{systemUpdate.manifest.notes}</span></div> : null}
           {systemUpdate?.state?.status ? <div className="settings-saved-note"><Check /><span>最近更新状态：{String(systemUpdate.state.status)}{systemUpdate.state.detail ? ` · ${String(systemUpdate.state.detail)}` : ''}</span></div> : null}
           {systemUpdate?.configured && !systemUpdate.applyConfigured ? <div className="settings-saved-note">更新包可以自动下载并校验；服务器需配置安全更新执行器后才能完成无人值守切换。</div> : null}

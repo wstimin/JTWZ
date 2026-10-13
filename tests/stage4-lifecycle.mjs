@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -73,6 +73,17 @@ async function waitForServer() {
   throw new Error('隔离测试服务启动超时')
 }
 
+function domainRequest(path, forwardedProto = 'http') {
+  return new Promise((resolveRequest, reject) => {
+    const request = httpRequest({ hostname: '127.0.0.1', port, path, headers: { Host: 'stage4.test', 'X-Forwarded-Proto': forwardedProto } }, (response) => {
+      response.resume()
+      response.once('end', () => resolveRequest({ status: response.statusCode, location: response.headers.location }))
+    })
+    request.once('error', reject)
+    request.end()
+  })
+}
+
 try {
   webhook = createServer(async (request, response) => {
     const chunks = []
@@ -95,7 +106,7 @@ try {
   const webhookPort = webhook.address().port
   child = spawn(process.execPath, ['dist-server/index.js'], {
     cwd: root,
-    env: { ...process.env, DATA_DIR: dataDir, API_PORT: String(port), ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: 'stage4-password', APP_SECRET: 'stage4-test-secret-with-sufficient-length', CERTIFICATE_PROVIDER: 'webhook', DNS_WEBHOOK_URL: `http://127.0.0.1:${webhookPort}` },
+    env: { ...process.env, NODE_ENV: 'production', ALLOW_LOCAL_STORAGE_IN_PRODUCTION: 'true', DATA_DIR: dataDir, API_PORT: String(port), ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: 'stage4-password', APP_SECRET: 'stage4-test-secret-with-sufficient-length', CERTIFICATE_PROVIDER: 'webhook', DNS_WEBHOOK_URL: `http://127.0.0.1:${webhookPort}` },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let serverError = ''
@@ -118,9 +129,15 @@ try {
   const isolatedDb = new DatabaseSync(resolve(dataDir, 'platform.db'))
   isolatedDb.prepare("UPDATE domains SET dns_status = 'verified', status = 'active', last_verified_at = ? WHERE id = ?").run(new Date().toISOString(), createdDomain.domain.id)
   isolatedDb.close()
+  const redirectBeforeCertificate = await domainRequest('/welcome?from=test')
+  assert.equal(redirectBeforeCertificate.status, 302)
+  assert.equal(redirectBeforeCertificate.location, 'https://example.org/welcome?from=test')
   const issued = await json(`/api/domains/${createdDomain.domain.id}/issue-certificate`, 'POST')
   assert.equal(issued.certificate.status, 'active')
   assert.equal(issued.task.status, 'succeeded')
+  const httpsUpgrade = await domainRequest('/welcome?from=test')
+  assert.equal(httpsUpgrade.status, 308)
+  assert.equal(httpsUpgrade.location, 'https://stage4.test/welcome?from=test')
   const diagnostics = await json(`/api/domains/${createdDomain.domain.id}/certificate-diagnostics`)
   assert.equal(diagnostics.certificates.length, 1)
   const renewed = await json(`/api/certificates/${issued.certificate.id}/renew`, 'POST')
