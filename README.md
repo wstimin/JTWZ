@@ -2,7 +2,7 @@
 
 JTWZ 是一个面向生产环境的综合平台，用于管理多域名跳转、静态网站发布和软件分发。
 
-当前稳定版本：[`v1.0.1`](https://github.com/wstimin/JTWZ/releases/tag/v1.0.1)
+当前稳定版本：[`v1.0.2`](https://github.com/wstimin/JTWZ/releases/tag/v1.0.2)
 
 它将公开展示端、管理后台和 API 分开构建：公开站负责产品介绍、公告和下载；管理端负责域名、跳转规则、站点、软件、版本、安装包、备份和系统设置；API 负责鉴权、数据持久化、对象存储直传、统计和运行时域名处理。
 
@@ -33,7 +33,7 @@ bash <(curl -fsSL -H 'Accept: application/vnd.github.raw' 'https://api.github.co
 sudo jt
 ```
 
-即可调出交互管理菜单；`sudo jtwzctl menu` 仍然兼容。菜单支持状态查看、域名增删改查、SSL 证书管理、配置修改、账号密码修改、完整备份、服务重启和保留/清除数据卸载。
+即可调出交互管理菜单；`sudo jtwzctl menu` 仍然兼容。菜单支持状态查看、域名增删改查、SSL 证书管理、配置修改、账号密码修改、完整备份、在线检查更新、服务重启和保留/清除数据卸载。更新会先创建完整备份、验证安装包 SHA-256，并在安装失败时恢复上一版程序。
 
 ### 方案 B：宝塔
 

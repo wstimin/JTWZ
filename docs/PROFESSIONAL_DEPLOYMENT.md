@@ -40,7 +40,7 @@ https://api.example.com       API 与运行时域名入口
 bash <(curl -fsSL -H 'Accept: application/vnd.github.raw' 'https://api.github.com/repos/wstimin/JTWZ/contents/deploy/one-click/install.sh?ref=main')
 ```
 
-也可以下载 `jtwz-one-click-vX.Y.Z.tar.gz` 后执行 `sudo ./install.sh`。安装器会从多个外部服务自动识别公网 IP，显示结果并允许改填公网域名；识别失败才要求手动输入。它拒绝回环、私网、链路本地和 CGNAT 地址。安装完成后使用 `sudo jt` 调出交互菜单。
+也可以下载 `jtwz-one-click-vX.Y.Z.tar.gz` 后执行 `sudo ./install.sh`。安装器会从多个外部服务自动识别公网 IP，显示结果并允许改填公网域名；识别失败才要求手动输入。它拒绝回环、私网、链路本地和 CGNAT 地址。安装完成后使用 `sudo jt` 调出交互菜单。菜单可检查 GitHub 最新正式版本，更新前自动创建完整备份并验证 SHA-256，失败时恢复上一版程序。
 
 未填写域名、直接使用公网 IP 时，服务对外监听 TCP `8787`，完整管理地址为 `http://公网IP:8787/admin/login`。安装器会处理 UFW/firewalld 并执行健康检查；云平台安全组需要单独放行 TCP `8787`。
 

@@ -170,6 +170,98 @@ PY
 backup_create() { api_login; curl -fsS -b "$COOKIE_FILE" -X POST "$API_URL/api/admin/backups/create" | pretty_json; }
 backup_list() { api_login; curl -fsS -b "$COOKIE_FILE" "$API_URL/api/admin/backups" | pretty_json; }
 
+system_update() {
+  [[ "$(id -u)" == 0 ]] || die '更新系统需要 root 权限，请使用 sudo jt update。'
+  need python3; need tar; need sha256sum
+  local requested_tag="${1:-}" current_version release_json target_tag target_version asset_name release_base
+  local temp_dir archive checksum_file expected_checksum actual_checksum installer confirm rollback_dir item path sum
+
+  current_version="$(python3 - "$APP_DIR/package.json" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding='utf-8')).get('version', 'unknown'))
+except Exception:
+    print('unknown')
+PY
+)"
+
+  if [[ -n "$requested_tag" ]]; then
+    target_tag="$requested_tag"
+    [[ "$target_tag" == v* ]] || target_tag="v$target_tag"
+  else
+    say '正在检查 GitHub 最新正式版本...'
+    release_json="$(curl -fsSL --connect-timeout 10 --max-time 30 -H 'Accept: application/vnd.github+json' 'https://api.github.com/repos/wstimin/JTWZ/releases/latest')" || die '无法检查 GitHub 最新版本。'
+    target_tag="$(printf '%s' "$release_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name", ""))')"
+  fi
+  [[ "$target_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || die "目标版本格式无效：$target_tag"
+  target_version="${target_tag#v}"
+
+  say "当前版本：v$current_version"
+  say "目标版本：$target_tag"
+  if [[ "$current_version" == "$target_version" ]]; then
+    say '当前已经是最新版本，无需更新。'
+    return 0
+  fi
+
+  read -r -p "确认更新到 $target_tag？输入 UPDATE: " confirm
+  [[ "$confirm" == UPDATE ]] || die '已取消更新。'
+
+  asset_name="jtwz-one-click-$target_tag.tar.gz"
+  release_base="https://github.com/wstimin/JTWZ/releases/download/$target_tag"
+  temp_dir="$(mktemp -d /tmp/jtwz-update.XXXXXX)"
+  archive="$temp_dir/$asset_name"
+  checksum_file="$temp_dir/SHA256SUMS"
+  rollback_dir="/opt/jtwz-code-rollback-${current_version}-$(date +%Y%m%d-%H%M%S)"
+
+  say '更新前创建完整迁移备份...'
+  backup_create >/dev/null || { rm -rf "$temp_dir"; die '完整备份失败，更新已终止。'; }
+
+  say "下载 $asset_name..."
+  curl -fL --retry 3 --connect-timeout 10 "$release_base/$asset_name" -o "$archive" || { rm -rf "$temp_dir"; die '更新包下载失败。'; }
+  curl -fL --retry 3 --connect-timeout 10 "$release_base/SHA256SUMS" -o "$checksum_file" || { rm -rf "$temp_dir"; die '校验文件下载失败。'; }
+
+  expected_checksum=''
+  while read -r sum path; do
+    [[ "${path##*/}" == "$asset_name" ]] && expected_checksum="$sum" && break
+  done < "$checksum_file"
+  [[ -n "$expected_checksum" ]] || { rm -rf "$temp_dir"; die 'SHA-256 清单中没有目标安装包。'; }
+  actual_checksum="$(sha256sum "$archive" | awk '{print $1}')"
+  [[ "$actual_checksum" == "$expected_checksum" ]] || { rm -rf "$temp_dir"; die '安装包 SHA-256 校验失败，更新已终止。'; }
+
+  tar -xzf "$archive" -C "$temp_dir"
+  installer="$(find "$temp_dir" -path '*/installer/install.sh' -type f -print -quit)"
+  [[ -n "$installer" ]] || { rm -rf "$temp_dir"; die '更新包结构不完整。'; }
+
+  install -d -m 700 "$rollback_dir"
+  for item in package.json package-lock.json dist dist-server; do
+    path="$APP_DIR/$item"
+    [[ -e "$path" ]] && cp -a "$path" "$rollback_dir/"
+  done
+  [[ -f /usr/local/bin/jtwzctl ]] && cp -a /usr/local/bin/jtwzctl "$rollback_dir/jtwzctl"
+
+  say '校验通过，开始安装新版本...'
+  if bash "$installer" standalone; then
+    rm -rf "$temp_dir" "$rollback_dir"
+    say "系统已更新到 $target_tag。请重新运行 jt 查看新菜单。"
+    return 0
+  fi
+
+  say '更新失败，正在恢复上一版程序...'
+  for item in package.json package-lock.json dist dist-server; do
+    [[ -e "$rollback_dir/$item" ]] || continue
+    rm -rf "$APP_DIR/$item"
+    cp -a "$rollback_dir/$item" "$APP_DIR/"
+  done
+  if [[ -f "$APP_DIR/package-lock.json" ]]; then npm --prefix "$APP_DIR" ci --omit=dev; else npm --prefix "$APP_DIR" install --omit=dev; fi
+  if [[ -f "$rollback_dir/jtwzctl" ]]; then
+    install -m 755 "$rollback_dir/jtwzctl" /usr/local/bin/jtwzctl
+    ln -sfn /usr/local/bin/jtwzctl /usr/local/bin/jt
+  fi
+  restart_service
+  rm -rf "$temp_dir" "$rollback_dir"
+  die '更新失败，已恢复上一版程序。'
+}
+
 account_update() {
   [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
   local current_username current_password new_username new_password value
@@ -248,13 +340,13 @@ JTWZ 服务器管理
 9) 修改 SSL 域名          10) 查看配置
 11) 修改配置              12) 修改管理员账号密码
 13) 创建完整备份          14) 查看备份
-15) 重启服务              16) 卸载并保留数据
-17) 卸载并清除数据
+15) 检查并更新系统        16) 重启服务
+17) 卸载并保留数据        18) 卸载并清除数据
 0) 退出
 EOF
     local choice; read -r -p '请选择: ' choice
     case "$choice" in
-      1) status ;; 2) domain_list ;; 3) domain_add ;; 4) domain_update ;; 5) domain_delete ;; 6) ssl_list ;; 7) ssl_add ;; 8) ssl_delete ;; 9) ssl_update ;; 10) config_show ;; 11) config_set ;; 12) account_update ;; 13) backup_create ;; 14) backup_list ;; 15) restart_service; status ;; 16) uninstall keep ;; 17) uninstall purge ;; 0) break ;; *) say '无效选项。' ;;
+      1) status ;; 2) domain_list ;; 3) domain_add ;; 4) domain_update ;; 5) domain_delete ;; 6) ssl_list ;; 7) ssl_add ;; 8) ssl_delete ;; 9) ssl_update ;; 10) config_show ;; 11) config_set ;; 12) account_update ;; 13) backup_create ;; 14) backup_list ;; 15) system_update ;; 16) restart_service; status ;; 17) uninstall keep ;; 18) uninstall purge ;; 0) break ;; *) say '无效选项。' ;;
     esac
   done
 }
@@ -266,8 +358,9 @@ case "${1:-menu}" in
   ssl) case "${2:-list}" in list) ssl_list ;; add) ssl_add ;; update|edit) ssl_update ;; delete|remove) ssl_delete ;; renew) need certbot; certbot renew; command -v nginx >/dev/null && systemctl reload nginx || true ;; *) die '用法：jtwzctl ssl {list|add|update|delete|renew}' ;; esac ;;
   config) case "${2:-show}" in show) config_show ;; set|update) config_set ;; *) die '用法：jtwzctl config {show|set}' ;; esac ;;
   backup) case "${2:-create}" in create) backup_create ;; list) backup_list ;; *) die '用法：jtwzctl backup {create|list}' ;; esac ;;
+  update|upgrade) system_update "${2:-}" ;;
   account) account_update ;;
   uninstall) uninstall ;;
   restart) restart_service ;;
-  *) die '用法：jtwzctl {menu|status|domain|ssl|config|account|backup|uninstall|restart}' ;;
+  *) die '用法：jtwzctl {menu|status|domain|ssl|config|account|backup|update|uninstall|restart}' ;;
 esac

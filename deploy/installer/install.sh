@@ -14,6 +14,7 @@ API_BIND_HOST='127.0.0.1'
 USE_REVERSE_PROXY='false'
 PUBLIC_BASE_URL=''
 ADMIN_BASE_URL=''
+EXISTING_INSTALL='false'
 [[ -d "$SOURCE_DIR" ]] || SOURCE_DIR="$(cd -- "$PACKAGE_DIR/.." && pwd)"
 
 say() { printf '\n[JTWZ] %s\n' "$*"; }
@@ -120,6 +121,16 @@ command -v curl >/dev/null || die '缺少 curl，请先安装后重试。'
 command -v openssl >/dev/null || die '缺少 openssl，请先安装后重试。'
 
 install_node() {
+  if ! command -v python3 >/dev/null; then
+    if command -v apt-get >/dev/null; then
+      apt-get update -y
+      apt-get install -y python3
+    elif command -v dnf >/dev/null; then
+      dnf install -y python3
+    else
+      die '缺少 python3，且无法识别 apt 或 dnf。'
+    fi
+  fi
   command -v node >/dev/null && command -v npm >/dev/null && return
   if command -v apt-get >/dev/null; then
     apt-get update -y
@@ -165,6 +176,22 @@ load_existing_env() {
 
 write_env() {
   install -d -m 750 "$APP_DIR/data" "$APP_DIR/data/backups" "$APP_DIR/data/storage" "$APP_DIR/data/site-releases" "$APP_DIR/data/temp" "$APP_DIR/data/brand-assets" "$APP_DIR/data/updates"
+  if [[ "$EXISTING_INSTALL" == 'true' ]]; then
+    upsert_env API_HOST "$API_BIND_HOST"
+    upsert_env API_PORT "$API_PORT"
+    upsert_env APP_HOST "$API_BIND_HOST"
+    upsert_env PUBLIC_ADDRESS "$PUBLIC_DOMAIN"
+    upsert_env ADMIN_ADDRESS "$ADMIN_DOMAIN"
+    upsert_env PUBLIC_DOMAIN "$PUBLIC_DOMAIN"
+    upsert_env ADMIN_DOMAIN "$ADMIN_DOMAIN"
+    upsert_env PUBLIC_URL "$PUBLIC_BASE_URL"
+    upsert_env ADMIN_LOGIN_URL "$ADMIN_BASE_URL/admin/login"
+    upsert_env APP_ORIGIN "$PUBLIC_BASE_URL"
+    upsert_env PUBLIC_APP_ORIGIN "$PUBLIC_BASE_URL"
+    upsert_env ADMIN_APP_ORIGIN "$ADMIN_BASE_URL"
+    chmod 600 "$ENV_FILE"
+    return
+  fi
   cat > "$ENV_FILE" <<EOF
 NODE_ENV=production
 API_HOST=$API_BIND_HOST
@@ -190,6 +217,19 @@ SUPPORT_EMAIL=$SUPPORT_EMAIL
 EOF
   chmod 600 "$ENV_FILE"
   if [[ "$PANEL" == '1panel' ]]; then ln -sfn "$ENV_FILE" "$APP_DIR/.env"; fi
+}
+
+upsert_env() {
+  local key="$1" value="$2" temp_file
+  temp_file="$(mktemp)"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { found = 0 }
+    index($0, key "=") == 1 { print key "=" value; found = 1; next }
+    { print }
+    END { if (!found) print key "=" value }
+  ' "$ENV_FILE" > "$temp_file"
+  install -m 600 "$temp_file" "$ENV_FILE"
+  rm -f "$temp_file"
 }
 
 install_application() {
@@ -301,7 +341,7 @@ install_panel_runtime() {
 main() {
   local control_script=''
   say "JTWZ 安装向导（$PANEL）"
-  if [[ -f "$ENV_FILE" && -s "$ENV_FILE" ]]; then load_existing_env; else prompt_settings; fi
+  if [[ -f "$ENV_FILE" && -s "$ENV_FILE" ]]; then EXISTING_INSTALL='true'; load_existing_env; else prompt_settings; fi
   validate_public_address "$PUBLIC_DOMAIN"
   validate_public_address "$ADMIN_DOMAIN"
   select_access_mode

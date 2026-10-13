@@ -1,7 +1,7 @@
 {
   "name": "aurelia-platform",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n PUBLIC,ADMIN,API -c yellow,blue,green \"npm:dev:public\" \"npm:dev:admin\" \"npm:dev:api\"",
