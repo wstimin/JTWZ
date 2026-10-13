@@ -62,6 +62,17 @@ function adminAccess(request: IncomingMessage) {
   }
 }
 
+function hasLocalUpdateAccess(request: IncomingMessage) {
+  const remoteAddress = request.socket.remoteAddress || ''
+  const loopback = remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress.startsWith('::ffff:127.')
+  if (!loopback) return false
+  const supplied = String(request.headers['x-jtwz-local-update-token'] || '')
+  const expected = createHash('sha256').update(`jtwz-local-update-v1:${config.appSecret}`).digest('hex')
+  const suppliedBuffer = Buffer.from(supplied)
+  const expectedBuffer = Buffer.from(expected)
+  return suppliedBuffer.length === expectedBuffer.length && timingSafeEqual(suppliedBuffer, expectedBuffer)
+}
+
 function writeEnvironmentValues(values: Record<string, string>) {
   const envPath = config.envPath
   const lines = existsSync(envPath) ? readFileSync(envPath, 'utf8').split(/\r?\n/) : []
@@ -713,6 +724,19 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
   }
 
   if (await handleAuthRoutes(request, response, url)) return
+
+  if (hasLocalUpdateAccess(request) && method === 'POST' && url.pathname === '/api/admin/system/update/check') {
+    const update = await checkedSystemUpdate()
+    audit(null, 'update_check', 'system', '1', update.configured ? String('latestVersion' in update ? update.latestVersion : config.systemVersion) : '未配置更新源（本机控制台）')
+    sendJson(response, 200, { update })
+    return
+  }
+  if (hasLocalUpdateAccess(request) && method === 'POST' && url.pathname === '/api/admin/system/update/install') {
+    const update = await applySystemUpdate()
+    audit(null, 'update_install', 'system', '1', `${update.version} / ${update.applyStarted ? '执行器已启动' : '已暂存'}（本机控制台）`)
+    sendJson(response, 202, { update })
+    return
+  }
 
   const admin = requireAdmin(request)
   enforceAdminRateLimit(request, admin.id)

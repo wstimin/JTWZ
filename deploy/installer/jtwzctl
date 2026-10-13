@@ -156,6 +156,13 @@ except Exception:
   return 0
 }
 
+local_update_token() {
+  local secret
+  secret="$(env_value APP_SECRET)"
+  [[ -n "$secret" ]] || die '本机更新凭据缺失，请检查 APP_SECRET 配置。'
+  printf 'jtwz-local-update-v1:%s' "$secret" | sha256sum | awk '{print $1}'
+}
+
 domain_list() { api_login; curl -fsS -b "$COOKIE_FILE" "$API_URL/api/domains" | pretty_json; }
 
 domain_add() {
@@ -286,10 +293,10 @@ backup_restore() {
 }
 
 system_update_safe() {
-  local status_json confirm response configured available current latest notes
-  api_login
+  local status_json confirm response configured available current latest notes update_token
+  update_token="$(local_update_token)"
   say '正在检查带 Ed25519 签名的正式更新清单...'
-  if ! api_call -b "$COOKIE_FILE" -X POST "$API_URL/api/admin/system/update/check"; then
+  if ! api_call -H "X-JTWZ-Local-Update-Token: $update_token" -X POST "$API_URL/api/admin/system/update/check"; then
     die "版本检测失败：${API_ERROR:-未知错误}"
   fi
   status_json="$API_BODY"
@@ -306,7 +313,7 @@ system_update_safe() {
   [[ "$available" == true ]] || { say '当前已经是最新版本。'; return 0; }
   read -r -p '系统将先创建完整备份，再校验更新包并执行健康检查。输入 UPDATE 继续: ' confirm
   [[ "$confirm" == UPDATE ]] || die '已取消更新。'
-  if ! api_call -b "$COOKIE_FILE" -X POST "$API_URL/api/admin/system/update/install"; then
+  if ! api_call -H "X-JTWZ-Local-Update-Token: $update_token" -X POST "$API_URL/api/admin/system/update/install"; then
     die "更新启动失败：${API_ERROR:-未知错误}"
   fi
   response="$API_BODY"
@@ -404,6 +411,164 @@ service_logs() {
   fi
 }
 
+ssl_renew() {
+  need certbot
+  certbot renew
+  if command -v nginx >/dev/null; then
+    nginx -t
+    systemctl reload nginx
+  fi
+}
+
+pause_menu() {
+  printf '\n'
+  read -r -p '按 Enter 返回菜单...' _ || true
+}
+
+run_menu_action() {
+  local exit_code=0
+  set +e
+  ( set -e; "$@" )
+  exit_code=$?
+  set -e
+  if (( exit_code != 0 )); then
+    say '操作未完成，请根据上方提示检查后重试。'
+  fi
+  pause_menu
+}
+
+domain_https_menu() {
+  while true; do
+    cat <<'EOF'
+
+[域名与 HTTPS]
+  1) 查看全部域名
+  2) 添加域名
+  3) 修改域名
+  4) 删除域名
+  5) 查看证书状态
+  6) 申请 HTTPS 证书
+  7) 更换证书域名
+  8) 删除证书
+  9) 续期全部证书
+  0) 返回主菜单
+EOF
+    local choice; read -r -p '请输入编号: ' choice
+    case "$choice" in
+      1) run_menu_action domain_list ;;
+      2) run_menu_action domain_add ;;
+      3) run_menu_action domain_update ;;
+      4) run_menu_action domain_delete ;;
+      5) run_menu_action ssl_list ;;
+      6) run_menu_action ssl_add ;;
+      7) run_menu_action ssl_update ;;
+      8) run_menu_action ssl_delete ;;
+      9) run_menu_action ssl_renew ;;
+      0) return ;;
+      *) say '无效选项。' ;;
+    esac
+  done
+}
+
+admin_account_menu() {
+  while true; do
+    cat <<'EOF'
+
+[管理后台与账号]
+  1) 查看当前访问地址
+  2) 修改管理后台入口
+  3) 修改管理员账号密码
+  0) 返回主菜单
+EOF
+    local choice; read -r -p '请输入编号: ' choice
+    case "$choice" in
+      1) run_menu_action access_urls ;;
+      2) run_menu_action admin_path_update ;;
+      3) run_menu_action account_update ;;
+      0) return ;;
+      *) say '无效选项。' ;;
+    esac
+  done
+}
+
+system_config_menu() {
+  while true; do
+    cat <<'EOF'
+
+[系统配置]
+  1) 查看当前配置
+  2) 修改系统配置
+  0) 返回主菜单
+EOF
+    local choice; read -r -p '请输入编号: ' choice
+    case "$choice" in
+      1) run_menu_action config_show ;;
+      2) run_menu_action config_set ;;
+      0) return ;;
+      *) say '无效选项。' ;;
+    esac
+  done
+}
+
+backup_menu() {
+  while true; do
+    cat <<'EOF'
+
+[备份与恢复]
+  1) 创建完整备份
+  2) 查看已有备份
+  3) 上传完整备份并恢复
+  0) 返回主菜单
+EOF
+    local choice; read -r -p '请输入编号: ' choice
+    case "$choice" in
+      1) run_menu_action backup_create ;;
+      2) run_menu_action backup_list ;;
+      3) run_menu_action backup_restore ;;
+      0) return ;;
+      *) say '无效选项。' ;;
+    esac
+  done
+}
+
+service_menu() {
+  while true; do
+    cat <<'EOF'
+
+[服务维护]
+  1) 重启服务
+  2) 查看最近服务日志
+  3) 查看系统与服务状态
+  0) 返回主菜单
+EOF
+    local choice; read -r -p '请输入编号: ' choice
+    case "$choice" in
+      1) run_menu_action restart_service ;;
+      2) run_menu_action service_logs ;;
+      3) run_menu_action status ;;
+      0) return ;;
+      *) say '无效选项。' ;;
+    esac
+  done
+}
+
+uninstall_menu() {
+  cat <<'EOF'
+
+[卸载系统]
+  1) 卸载程序并保留数据
+  2) 卸载程序并清除数据（不可恢复）
+  0) 返回主菜单
+EOF
+  local choice; read -r -p '请输入编号: ' choice
+  case "$choice" in
+    1) if ( uninstall keep ); then exit 0; else say '已取消卸载。'; pause_menu; fi ;;
+    2) if ( uninstall purge ); then exit 0; else say '已取消卸载。'; pause_menu; fi ;;
+    0) return ;;
+    *) say '无效选项。' ;;
+  esac
+}
+
 menu() {
   while true; do
     printf '\n%s\n' '============================================================'
@@ -411,40 +576,29 @@ menu() {
     printf '%s\n' '============================================================'
     printf '应用目录：%s\n服务地址：%s\n\n' "$APP_DIR" "$API_URL"
     cat <<'EOF'
-[系统]
+[主菜单]
   1) 查看系统与服务状态
-  2) 查看当前访问地址
-  3) 修改管理后台入口
-  17) 检查并更新系统
-  18) 重启服务
-  22) 查看最近服务日志
-
-[域名与证书]
-  4) 查看域名
-  5) 添加域名
-  6) 修改域名
-  7) 删除域名
-  8) 查看 SSL 证书
-  9) 添加 SSL 证书
-  10) 删除 SSL 证书
-  11) 修改 SSL 域名
-
-[账号、配置与备份]
-  12) 修改管理员账号密码
-  13) 查看配置
-  14) 修改配置
-  15) 创建完整备份
-  16) 查看备份
-  21) 上传完整备份并恢复
-
-[卸载]
-  19) 卸载并保留数据
-  20) 卸载并清除数据
+  2) 检查并更新系统
+  3) 域名与 HTTPS
+  4) 管理后台与账号
+  5) 系统配置
+  6) 备份与恢复
+  7) 服务维护
+  8) 卸载系统（危险操作）
   0) 退出
 EOF
     local choice; read -r -p '请输入编号: ' choice
     case "$choice" in
-      1) status ;; 2) access_urls ;; 3) admin_path_update ;; 4) domain_list ;; 5) domain_add ;; 6) domain_update ;; 7) domain_delete ;; 8) ssl_list ;; 9) ssl_add ;; 10) ssl_delete ;; 11) ssl_update ;; 12) account_update ;; 13) config_show ;; 14) config_set ;; 15) backup_create ;; 16) backup_list ;; 17) system_update_safe ;; 18) restart_service; status ;; 19) uninstall keep ;; 20) uninstall purge ;; 21) backup_restore ;; 22) service_logs ;; 0) break ;; *) say '无效选项。' ;;
+      1) run_menu_action status ;;
+      2) run_menu_action system_update_safe ;;
+      3) domain_https_menu ;;
+      4) admin_account_menu ;;
+      5) system_config_menu ;;
+      6) backup_menu ;;
+      7) service_menu ;;
+      8) uninstall_menu ;;
+      0) break ;;
+      *) say '无效选项。' ;;
     esac
   done
 }
@@ -455,7 +609,7 @@ case "${1:-menu}" in
   access|urls) access_urls ;;
   admin-path) case "${2:-show}" in show) access_urls ;; set|update) admin_path_update "${3:-}" ;; *) die '用法：jtwzctl admin-path {show|set [后缀]}' ;; esac ;;
   domain) case "${2:-list}" in list) domain_list ;; add) domain_add ;; update|edit) domain_update ;; delete|remove) domain_delete ;; *) die '用法：jtwzctl domain {list|add|update|delete}' ;; esac ;;
-  ssl) case "${2:-list}" in list) ssl_list ;; add) ssl_add ;; update|edit) ssl_update ;; delete|remove) ssl_delete ;; renew) need certbot; certbot renew; command -v nginx >/dev/null && systemctl reload nginx || true ;; *) die '用法：jtwzctl ssl {list|add|update|delete|renew}' ;; esac ;;
+  ssl) case "${2:-list}" in list) ssl_list ;; add) ssl_add ;; update|edit) ssl_update ;; delete|remove) ssl_delete ;; renew) ssl_renew ;; *) die '用法：jtwzctl ssl {list|add|update|delete|renew}' ;; esac ;;
   config) case "${2:-show}" in show) config_show ;; set|update) config_set ;; *) die '用法：jtwzctl config {show|set}' ;; esac ;;
   backup) case "${2:-create}" in create) backup_create ;; list) backup_list ;; restore|import) backup_restore "${3:-}" ;; *) die '用法：jtwzctl backup {create|list|restore [文件]}' ;; esac ;;
   update|upgrade) system_update_safe ;;

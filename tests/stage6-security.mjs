@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createHmac } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
@@ -72,6 +72,11 @@ try {
 
   const owner = await login('owner', 'stage6-password')
   assert.ok(owner.csrf)
+  const localUpdateToken = createHash('sha256').update('jtwz-local-update-v1:stage6-app-secret-for-security-tests').digest('hex')
+  const localUpdateCheck = await fetch(`${base}/api/admin/system/update/check`, { method: 'POST', headers: { 'X-JTWZ-Local-Update-Token': localUpdateToken } })
+  assert.equal(localUpdateCheck.status, 200)
+  const rejectedLocalUpdate = await fetch(`${base}/api/admin/system/update/check`, { method: 'POST', headers: { 'X-JTWZ-Local-Update-Token': 'invalid' } })
+  assert.equal(rejectedLocalUpdate.status, 401)
   const systemConfig = await api(owner, '/api/admin/system/config', 'PUT', { storageProvider: 'local', dnsProvider: 'manual', certificateProvider: 'manual', dnsWebhookUrl: 'http://127.0.0.1:19999/jtwz' })
   assert.equal(systemConfig.response.status, 200, systemConfig.payload.error)
   assert.equal(systemConfig.payload.config.dnsWebhookUrl, 'http://127.0.0.1:19999/jtwz')
@@ -124,6 +129,7 @@ try {
   const updateDispatcher = readFileSync(resolve(root, 'deploy/installer/jtwz-update-dispatch'), 'utf8')
   const domainExecutor = readFileSync(resolve(root, 'deploy/installer/jtwz-domain'), 'utf8')
   const domainDispatcher = readFileSync(resolve(root, 'deploy/installer/jtwz-domain-dispatch'), 'utf8')
+  const controlScript = readFileSync(resolve(root, 'deploy/installer/jtwzctl'), 'utf8')
   const sharedStyles = readFileSync(resolve(root, 'src/styles.css'), 'utf8')
   const themeContext = readFileSync(resolve(root, 'src/contexts/ThemeContext.tsx'), 'utf8')
   const adminShell = readFileSync(resolve(root, 'src/components/AdminShell.tsx'), 'utf8')
@@ -147,6 +153,12 @@ try {
   assert.match(readFileSync(resolve(root, 'server/index.ts'), 'utf8'), /provider === 'certbot'[\s\S]*otherLive/)
   assert.match(domainDispatcher, /domain-jobs/)
   assert.match(installer, /jtwz-domain\.path/)
+  assert.match(controlScript, /\[主菜单\][\s\S]*1\) 查看系统与服务状态[\s\S]*2\) 检查并更新系统[\s\S]*3\) 域名与 HTTPS/)
+  assert.match(controlScript, /domain_https_menu\(\)/)
+  assert.match(controlScript, /admin_account_menu\(\)/)
+  assert.match(controlScript, /backup_menu\(\)/)
+  assert.match(controlScript, /X-JTWZ-Local-Update-Token/)
+  assert.doesNotMatch(controlScript, /17\) 检查并更新系统|22\) 查看最近服务日志/)
   assert.match(sharedStyles, /--native-menu-bg/)
   assert.match(sharedStyles, /select option:checked/)
   assert.match(sharedStyles, /color-scheme: dark/)
