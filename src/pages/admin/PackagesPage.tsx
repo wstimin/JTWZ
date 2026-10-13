@@ -7,6 +7,7 @@ import { useToast } from '../../contexts/ToastContext'
 import { useAuth } from '../../contexts/AuthContext'
 import { apiJson, apiRequest, csrfHeaders } from '../../lib/api'
 import { apiUrl } from '../../lib/appUrls'
+import { copyText } from '../../lib/clipboard'
 import { sha256File } from '../../lib/sha256'
 
 const packageStatus = { available: '可下载', paused: '已暂停', processing: '处理中' }
@@ -264,10 +265,14 @@ export function PackagesPage({ packages, setPackages, software, storage, lockedS
     }
   }
 
-  function copyDownload(item: PackageRecord) {
+  async function copyDownload(item: PackageRecord) {
     if (!item.downloadUrl) return notify('当前安装包不可下载', 'info')
-    void navigator.clipboard?.writeText(apiUrl(item.downloadUrl))
-    notify('15 分钟有效的签名下载地址已复制')
+    try {
+      await copyText(apiUrl(item.downloadUrl))
+      notify('15 分钟有效的签名下载地址已复制')
+    } catch {
+      notify('复制失败，请选中下载地址后手动复制', 'info')
+    }
   }
 
   const visibleSessions = resumableSessions.filter((item) => {
@@ -307,7 +312,7 @@ export function PackagesPage({ packages, setPackages, software, storage, lockedS
                 <td><div className="table-stack"><strong>{embedded ? `v${item.version}` : item.software}</strong>{!embedded ? <small>v{item.version}</small> : null}</div></td>
                 <td>{item.platform}</td><td>{item.size}</td><td><span className="table-muted">{item.storage}</span></td><td><strong>{item.downloads.toLocaleString()}</strong></td>
                 <td><span className="content-status" data-status={item.status}>{item.status === 'available' ? <CheckCircle2 /> : <PauseCircle />}{packageStatus[item.status]}</span></td>
-                <td><div className="row-actions"><button aria-label="复制签名下载地址" onClick={() => copyDownload(item)}><Copy /></button>{canManage ? <><button aria-label="编辑安装包信息" title="编辑安装包信息" onClick={() => beginEdit(item)}><Pencil /></button><button aria-label={item.status === 'available' ? '暂停下载' : '恢复下载'} title={item.status === 'available' ? '暂停下载' : '恢复下载'} onClick={() => void togglePackage(item)}>{item.status === 'available' ? <PauseCircle /> : <PlayCircle />}</button><button className="danger-icon" aria-label="删除安装包" title="删除安装包" onClick={() => void removePackage(item)}><Trash2 /></button></> : null}</div></td>
+                <td><div className="row-actions"><button aria-label="复制签名下载地址" onClick={() => void copyDownload(item)}><Copy /></button>{canManage ? <><button aria-label="编辑安装包信息" title="编辑安装包信息" onClick={() => beginEdit(item)}><Pencil /></button><button aria-label={item.status === 'available' ? '暂停下载' : '恢复下载'} title={item.status === 'available' ? '暂停下载' : '恢复下载'} onClick={() => void togglePackage(item)}>{item.status === 'available' ? <PauseCircle /> : <PlayCircle />}</button><button className="danger-icon" aria-label="删除安装包" title="删除安装包" onClick={() => void removePackage(item)}><Trash2 /></button></> : null}</div></td>
               </tr>
             ))}</tbody>
           </table>

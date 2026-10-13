@@ -133,6 +133,9 @@ try {
   const sharedStyles = readFileSync(resolve(root, 'src/styles.css'), 'utf8')
   const themeContext = readFileSync(resolve(root, 'src/contexts/ThemeContext.tsx'), 'utf8')
   const adminShell = readFileSync(resolve(root, 'src/components/AdminShell.tsx'), 'utf8')
+  const clipboardHelper = readFileSync(resolve(root, 'src/lib/clipboard.ts'), 'utf8')
+  const clipboardConsumers = ['src/pages/admin/DomainsPage.tsx', 'src/pages/admin/PackagesPage.tsx']
+    .map((path) => readFileSync(resolve(root, path), 'utf8'))
   const htmlEntries = ['index.html', 'apps/public/index.html', 'apps/admin/index.html']
     .map((path) => readFileSync(resolve(root, path), 'utf8'))
   assert.match(installer, /User=jtwz/)
@@ -167,6 +170,10 @@ try {
   assert.ok(htmlEntries.every((html) => !html.includes('<script>')), 'theme bootstrapping must comply with the inline-script CSP')
   assert.match(adminShell, /label: '软件发布'/)
   assert.doesNotMatch(adminShell, /to: '\/versions'|to: '\/packages'/)
+  assert.match(clipboardHelper, /window\.isSecureContext/)
+  assert.match(clipboardHelper, /document\.execCommand\('copy'\)/)
+  assert.ok(clipboardConsumers.every((source) => source.includes('copyText')))
+  assert.ok(clipboardConsumers.every((source) => !source.includes('navigator.clipboard')))
 
   console.log('stage6: RBAC, CSRF, request IDs, 2FA, sessions, login alerts, audit metadata and low-privilege deployment passed')
   if (serverError) assert.doesNotMatch(serverError, /Error|Exception/)

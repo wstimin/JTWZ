@@ -24,6 +24,7 @@ import { Modal } from '../../components/Modal'
 import { useToast } from '../../contexts/ToastContext'
 import { useAuth } from '../../contexts/AuthContext'
 import { apiJson, apiRequest } from '../../lib/api'
+import { copyText } from '../../lib/clipboard'
 
 interface DnsInstructions {
   type: 'TXT'
@@ -100,6 +101,15 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
   )
 
   const [saving, setSaving] = useState(false)
+
+  async function copyValue(value: string, successMessage: string) {
+    try {
+      await copyText(value)
+      notify(successMessage)
+    } catch {
+      notify('复制失败，请选中文字后手动复制', 'info')
+    }
+  }
 
   function resetForm() {
     setEditingId(null)
@@ -369,7 +379,7 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
                   <td><DomainStatusBadge status={domain.status} /></td>
                   <td><strong>{domain.visits.toLocaleString()}</strong></td>
                   <td>{domain.certificateStatus === 'active' ? <span className="ssl-state"><ShieldCheck /> 已生效</span> : <span className="table-muted">{domain.dnsStatus === 'verified' ? '待签发' : '待验证'}</span>}</td>
-                  <td><div className="row-actions"><button aria-label="复制域名" title="复制域名" onClick={() => { navigator.clipboard?.writeText(domain.hostname); notify('域名已复制') }}><Copy /></button>{canManage ? <button aria-label="编辑域名" title="编辑域名" onClick={() => openEdit(domain)}><Edit3 /></button> : null}<button aria-label="DNS 与 HTTPS 信息" title="DNS 与 HTTPS 信息" onClick={() => void openDns(domain)}><ShieldCheck /></button><button aria-label="打开目标" title="打开目标" onClick={() => { if (/^https?:\/\//.test(domain.target)) window.open(domain.target, '_blank', 'noopener,noreferrer') }}><ExternalLink /></button>{canManage ? <><button aria-label={domain.status === 'active' ? '暂停域名' : '启用域名'} title={domain.status === 'active' ? '暂停域名' : '启用域名'} onClick={() => void toggleDomain(domain)} disabled={domain.status !== 'active' && domain.dnsStatus !== 'verified'}>{domain.status === 'active' ? <PauseCircle /> : <PlayCircle />}</button><button className="danger-icon" aria-label="删除域名" title="删除域名" onClick={() => void removeDomain(domain.id)}><Trash2 /></button></> : null}</div></td>
+                  <td><div className="row-actions"><button aria-label="复制域名" title="复制域名" onClick={() => void copyValue(domain.hostname, '域名已复制')}><Copy /></button>{canManage ? <button aria-label="编辑域名" title="编辑域名" onClick={() => openEdit(domain)}><Edit3 /></button> : null}<button aria-label="DNS 与 HTTPS 信息" title="DNS 与 HTTPS 信息" onClick={() => void openDns(domain)}><ShieldCheck /></button><button aria-label="打开目标" title="打开目标" onClick={() => { if (/^https?:\/\//.test(domain.target)) window.open(domain.target, '_blank', 'noopener,noreferrer') }}><ExternalLink /></button>{canManage ? <><button aria-label={domain.status === 'active' ? '暂停域名' : '启用域名'} title={domain.status === 'active' ? '暂停域名' : '启用域名'} onClick={() => void toggleDomain(domain)} disabled={domain.status !== 'active' && domain.dnsStatus !== 'verified'}>{domain.status === 'active' ? <PauseCircle /> : <PlayCircle />}</button><button className="danger-icon" aria-label="删除域名" title="删除域名" onClick={() => void removeDomain(domain.id)}><Trash2 /></button></> : null}</div></td>
                 </tr>
               ))}
             </tbody>
@@ -401,9 +411,9 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
           {canManage && dnsInstructions.dnsProvider.configured ? <button className="button button--secondary" type="button" onClick={() => void publishDns()} disabled={publishingDns}><ShieldCheck /> {publishingDns ? '正在写入…' : `自动写入 ${dnsInstructions.dnsProvider.provider === 'cloudflare' ? 'Cloudflare' : 'DNS'}`}</button> : null}
           {canManage && dnsInstructions.routeAutomationConfigured ? <button className="button button--secondary" type="button" onClick={() => void applyDomainRoute()} disabled={applyingRoute}><RefreshCw className={applyingRoute ? 'is-spinning' : undefined} /> {applyingRoute ? '正在修复入口…' : '修复域名入口'}</button> : null}
           {canManage && dnsInstructions.certificateProvider.configured ? <button className="button button--secondary" type="button" onClick={() => void issueCertificate()} disabled={issuingCertificate || dnsInstructions.dnsStatus !== 'verified' || !dnsInstructions.routing.ready} title={!dnsInstructions.routing.ready ? '请先添加指向服务器的 A 记录' : undefined}><ShieldCheck /> {issuingCertificate ? '正在配置 HTTPS…' : dnsInstructions.certificateStatus === 'active' ? '重新部署 HTTPS' : '启用 HTTPS'}</button> : null}
-          <div className="dns-record-grid"><div><span>记录类型</span><strong>{dnsInstructions.type}</strong></div><div><span>主机记录</span><strong>{dnsInstructions.name}</strong><button type="button" onClick={() => { void navigator.clipboard?.writeText(dnsInstructions.name); notify('主机记录已复制') }}><Copy /></button></div><div className="dns-record-value"><span>记录值</span><strong>{dnsInstructions.value}</strong><button type="button" onClick={() => { void navigator.clipboard?.writeText(dnsInstructions.value); notify('TXT 记录值已复制') }}><Copy /></button></div></div>
+          <div className="dns-record-grid"><div><span>记录类型</span><strong>{dnsInstructions.type}</strong></div><div><span>主机记录</span><strong>{dnsInstructions.name}</strong><button type="button" onClick={() => void copyValue(dnsInstructions.name, '主机记录已复制')}><Copy /></button></div><div className="dns-record-value"><span>记录值</span><strong>{dnsInstructions.value}</strong><button type="button" onClick={() => void copyValue(dnsInstructions.value, 'TXT 记录值已复制')}><Copy /></button></div></div>
           <div className="form-note"><Globe2 /><div><strong>添加域名解析记录</strong><span>TXT 用于证明所有权；A 记录才能把访客流量发送到这台服务器。</span></div></div>
-          <div className="dns-record-grid"><div><span>记录类型</span><strong>{dnsInstructions.routing.type}</strong></div><div><span>主机记录</span><strong>{dnsInstructions.routing.name}</strong><button type="button" onClick={() => { void navigator.clipboard?.writeText(dnsInstructions.routing.name); notify('A 记录主机名已复制') }}><Copy /></button></div><div className="dns-record-value"><span>记录值</span><strong>{dnsInstructions.routing.value || '服务器公网 IP'}</strong><button type="button" onClick={() => { void navigator.clipboard?.writeText(dnsInstructions.routing.value); notify('服务器地址已复制') }}><Copy /></button></div></div>
+          <div className="dns-record-grid"><div><span>记录类型</span><strong>{dnsInstructions.routing.type}</strong></div><div><span>主机记录</span><strong>{dnsInstructions.routing.name}</strong><button type="button" onClick={() => void copyValue(dnsInstructions.routing.name, 'A 记录主机名已复制')}><Copy /></button></div><div className="dns-record-value"><span>记录值</span><strong>{dnsInstructions.routing.value || '服务器公网 IP'}</strong><button type="button" onClick={() => void copyValue(dnsInstructions.routing.value, '服务器地址已复制')}><Copy /></button></div></div>
           <p className="dns-hint">完整查询名称：{dnsInstructions.fullName}<br />所有权：{dnsInstructions.dnsStatus === 'verified' ? '已验证' : '等待验证'} · 域名解析：{dnsInstructions.routing.ready ? `已生效（${dnsInstructions.routing.addresses.join('、')}）` : '缺少 A/AAAA 记录'} · HTTPS：{dnsInstructions.certificateStatus === 'active' ? '已生效' : '等待签发'}</p>
 
           <section className="certificate-lifecycle">

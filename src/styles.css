@@ -5893,3 +5893,11 @@ svg {
     width: 100%;
   }
 }
+.clipboard-copy-source {
+  position: fixed;
+  inset: 0 auto auto -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
