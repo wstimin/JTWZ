@@ -1,7 +1,7 @@
 {
   "id": "jtwz",
   "name": "JTWZ 综合域名管理平台",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "1panel-app",
   "compose": "docker-compose.yml",
   "entrypoint": "install.sh",

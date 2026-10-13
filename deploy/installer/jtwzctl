@@ -14,6 +14,9 @@ die() { printf '[JTWZ][错误] %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || die "缺少命令：$1"; }
 need curl
 
+LOGIN_ERROR=''
+API_ERROR=''
+
 env_value() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tail -n 1; }
 [[ -n "$API_URL" ]] || API_URL="http://127.0.0.1:$(env_value API_PORT)"
 [[ "$API_URL" != 'http://127.0.0.1:' ]] || API_URL='http://127.0.0.1:8787'
@@ -48,7 +51,7 @@ admin_path_update() {
     read -r -p '管理员账号: ' username
     read -r -s -p '当前管理员密码: ' password; printf '\n' >&2
   fi
-  api_login_with "$username" "$password"
+  if ! api_login_with "$username" "$password"; then die "API 登录失败：${LOGIN_ERROR:-未知错误}"; fi
   response="$(curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/json' -X PUT -d "$(python3 - "$password" "$next_path" <<'PY'
 import json, sys
 print(json.dumps({'currentPassword': sys.argv[1], 'adminBasePath': sys.argv[2]}))
@@ -67,30 +70,91 @@ api_login() {
     read -r -p '管理员账号: ' username
     read -r -s -p '管理员密码: ' password; printf '\n' >&2
   fi
-  api_login_with "$username" "$password"
+  if api_login_with "$username" "$password"; then return 0; fi
+  say "保存的管理员凭据登录失败：${LOGIN_ERROR:-未知错误}"
+  read -r -p "管理员账号 [$username]: " retry_username; retry_username="${retry_username:-$username}"
+  read -r -s -p '管理员密码: ' retry_password; printf '\n' >&2
+  if ! api_login_with "$retry_username" "$retry_password"; then
+    die "API 登录失败：${LOGIN_ERROR:-未知错误}"
+  fi
 }
 
 api_login_with() {
-  local username="$1" password="$2" response challenge code
-  response="$(curl -fsS -c "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$username" "$password" <<'PY'
+  local username="$1" password="$2" response status body challenge code
+  LOGIN_ERROR=''
+  if response="$(curl -sS -w $'\n%{http_code}' -c "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$username" "$password" <<'PY'
 import json, sys
 print(json.dumps({'username': sys.argv[1], 'password': sys.argv[2]}))
 PY
-)" "$API_URL/api/auth/login")" || die 'API 登录失败，请确认服务和管理员凭据。'
-  if printf '%s' "$response" | grep -q '"requiresTwoFactor":true'; then
-    challenge="$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("challengeId", ""))')"
-    [[ -n "$challenge" ]] || die '服务器要求双重验证，但未返回验证挑战。'
+ )" "$API_URL/api/auth/login" 2>&1)"; then
+    status="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+  else
+    LOGIN_ERROR='无法连接 API，请确认服务正在运行。'
+    return 2
+  fi
+  if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+    LOGIN_ERROR="$(printf '%s' "$body" | python3 -c 'import json,sys
+try:
+ print(json.load(sys.stdin).get("error", "API 登录失败"))
+except Exception:
+ print("API 登录失败（HTTP " + sys.argv[1] + "）")' "$status" 2>/dev/null)"
+    [[ -n "$LOGIN_ERROR" ]] || LOGIN_ERROR="API 登录失败（HTTP $status）。"
+    return 1
+  fi
+  if printf '%s' "$body" | grep -q '"requiresTwoFactor":true'; then
+    challenge="$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("challengeId", ""))')"
+    if [[ -z "$challenge" ]]; then LOGIN_ERROR='服务器要求双重验证，但未返回验证挑战。'; return 1; fi
     read -r -p '动态验证码或恢复码: ' code
-    response="$(curl -fsS -b "$COOKIE_FILE" -c "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$challenge" "$code" <<'PY'
+    if ! response="$(curl -sS -w $'\n%{http_code}' -b "$COOKIE_FILE" -c "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$challenge" "$code" <<'PY'
 import json, sys
 print(json.dumps({'challengeId': sys.argv[1], 'code': sys.argv[2]}))
 PY
-)" "$API_URL/api/auth/two-factor")" || die '双重验证失败。'
+ )" "$API_URL/api/auth/two-factor" 2>&1)"; then
+      LOGIN_ERROR='无法连接 API，双重验证未完成。'
+      return 2
+    fi
+    status="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+    if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+      LOGIN_ERROR="$(printf '%s' "$body" | python3 -c 'import json,sys
+try:
+ print(json.load(sys.stdin).get("error", "双重验证失败"))
+except Exception:
+ print("双重验证失败（HTTP " + sys.argv[1] + "）")' "$status" 2>/dev/null)"
+      [[ -n "$LOGIN_ERROR" ]] || LOGIN_ERROR="双重验证失败（HTTP $status）。"
+      return 1
+    fi
   fi
-  printf '%s' "$response" | grep -q '"username"' || die 'API 登录未通过。'
+  printf '%s' "$body" | grep -q '"username"' || { LOGIN_ERROR='API 登录未返回有效会话。'; return 1; }
+  return 0
 }
 
 pretty_json() { if command -v python3 >/dev/null; then python3 -m json.tool; else cat; fi; }
+
+api_call() {
+  local raw status body
+  API_ERROR=''
+  if raw="$(curl -sS -w $'\n%{http_code}' "$@" 2>&1)"; then
+    API_STATUS="${raw##*$'\n'}"
+    API_BODY="${raw%$'\n'*}"
+  else
+    API_STATUS='000'
+    API_BODY=''
+    API_ERROR='无法连接 API，请确认服务正在运行。'
+    return 2
+  fi
+  if [[ ! "$API_STATUS" =~ ^2[0-9][0-9]$ ]]; then
+    API_ERROR="$(printf '%s' "$API_BODY" | python3 -c 'import json,sys
+try:
+ print(json.load(sys.stdin).get("error", "API 请求失败"))
+except Exception:
+ print("API 请求失败（HTTP " + sys.argv[1] + "）")' "$API_STATUS" 2>/dev/null)"
+    [[ -n "$API_ERROR" ]] || API_ERROR="API 请求失败（HTTP $API_STATUS）。"
+    return 1
+  fi
+  return 0
+}
 
 domain_list() { api_login; curl -fsS -b "$COOKIE_FILE" "$API_URL/api/domains" | pretty_json; }
 
@@ -222,16 +286,30 @@ backup_restore() {
 }
 
 system_update_safe() {
-  local status_json confirm response
+  local status_json confirm response configured available current latest notes
   api_login
   say '正在检查带 Ed25519 签名的正式更新清单...'
-  status_json="$(curl -fsS -b "$COOKIE_FILE" -X POST "$API_URL/api/admin/system/update/check")" || die '版本检测失败。'
+  if ! api_call -b "$COOKIE_FILE" -X POST "$API_URL/api/admin/system/update/check"; then
+    die "版本检测失败：${API_ERROR:-未知错误}"
+  fi
+  status_json="$API_BODY"
   printf '%s' "$status_json" | pretty_json
-  printf '%s' "$status_json" | grep -q '"configured":true' || die '更新清单或签名公钥尚未配置。'
-  printf '%s' "$status_json" | grep -q '"updateAvailable":true' || { say '当前已经是最新版本。'; return 0; }
+  configured="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("update", {}).get("configured", False)).lower())')"
+  [[ "$configured" == true ]] || die "更新源未配置：$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("update", {}).get("configurationError", "请配置更新清单地址和签名公钥"))')"
+  current="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("update", {}).get("currentVersion", "未知"))')"
+  latest="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("update", {}).get("latestVersion", "未知"))')"
+  available="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("update", {}).get("updateAvailable", False)).lower())')"
+  notes="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("update", {}).get("manifest", {}).get("notes", ""))')"
+  say "当前版本：v$current"
+  say "可用版本：v$latest"
+  [[ -z "$notes" ]] || say "更新说明：$notes"
+  [[ "$available" == true ]] || { say '当前已经是最新版本。'; return 0; }
   read -r -p '系统将先创建完整备份，再校验更新包并执行健康检查。输入 UPDATE 继续: ' confirm
   [[ "$confirm" == UPDATE ]] || die '已取消更新。'
-  response="$(curl -fsS -b "$COOKIE_FILE" -X POST "$API_URL/api/admin/system/update/install")" || die '更新启动失败。'
+  if ! api_call -b "$COOKIE_FILE" -X POST "$API_URL/api/admin/system/update/install"; then
+    die "更新启动失败：${API_ERROR:-未知错误}"
+  fi
+  response="$API_BODY"
   printf '%s' "$response" | pretty_json
   if printf '%s' "$response" | grep -q '"applyStarted":true'; then
     say '更新执行器已接管；失败时会自动恢复上一版程序。稍后运行 jt status 查看结果。'
@@ -252,7 +330,7 @@ account_update() {
   read -r -p "新管理员账号 [$current_username]: " new_username; new_username="${new_username:-$current_username}"
   read -r -s -p '新管理员密码（至少 6 位）: ' new_password; printf '\n' >&2
   [[ "${#new_password}" -ge 6 ]] || die '管理员密码至少需要 6 位。'
-  api_login_with "$current_username" "$current_password"
+  if ! api_login_with "$current_username" "$current_password"; then die "API 登录失败：${LOGIN_ERROR:-未知错误}"; fi
   curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/json' -X PUT -d "$(python3 - "$current_password" "$new_password" "$new_username" <<'PY'
 import json, sys
 print(json.dumps({'currentPassword': sys.argv[1], 'newPassword': sys.argv[2], 'newUsername': sys.argv[3]}))
@@ -321,24 +399,43 @@ service_logs() {
 
 menu() {
   while true; do
+    printf '\n%s\n' '============================================================'
+    printf '%s\n' '                    JTWZ 服务器管理'
+    printf '%s\n' '============================================================'
+    printf '应用目录：%s\n服务地址：%s\n\n' "$APP_DIR" "$API_URL"
     cat <<'EOF'
+[系统]
+  1) 查看系统与服务状态
+  2) 查看当前访问地址
+  3) 修改管理后台入口
+  17) 检查并更新系统
+  18) 重启服务
+  22) 查看最近服务日志
 
-JTWZ 服务器管理
-1) 查看系统与服务状态     2) 查看当前访问地址
-3) 修改管理后台后缀       4) 查看域名
-5) 添加域名                6) 修改域名
-7) 删除域名                8) 查看 SSL 证书
-9) 添加 SSL 证书          10) 删除 SSL 证书
-11) 修改 SSL 域名         12) 修改管理员账号密码
-13) 查看配置              14) 修改配置
-15) 创建完整备份          16) 查看备份
-17) 检查并更新系统        18) 重启服务
-19) 卸载并保留数据        20) 卸载并清除数据
-21) 上传完整备份并恢复
-22) 查看最近服务日志
-0) 退出
+[域名与证书]
+  4) 查看域名
+  5) 添加域名
+  6) 修改域名
+  7) 删除域名
+  8) 查看 SSL 证书
+  9) 添加 SSL 证书
+  10) 删除 SSL 证书
+  11) 修改 SSL 域名
+
+[账号、配置与备份]
+  12) 修改管理员账号密码
+  13) 查看配置
+  14) 修改配置
+  15) 创建完整备份
+  16) 查看备份
+  21) 上传完整备份并恢复
+
+[卸载]
+  19) 卸载并保留数据
+  20) 卸载并清除数据
+  0) 退出
 EOF
-    local choice; read -r -p '请选择: ' choice
+    local choice; read -r -p '请输入编号: ' choice
     case "$choice" in
       1) status ;; 2) access_urls ;; 3) admin_path_update ;; 4) domain_list ;; 5) domain_add ;; 6) domain_update ;; 7) domain_delete ;; 8) ssl_list ;; 9) ssl_add ;; 10) ssl_delete ;; 11) ssl_update ;; 12) account_update ;; 13) config_show ;; 14) config_set ;; 15) backup_create ;; 16) backup_list ;; 17) system_update_safe ;; 18) restart_service; status ;; 19) uninstall keep ;; 20) uninstall purge ;; 21) backup_restore ;; 22) service_logs ;; 0) break ;; *) say '无效选项。' ;;
     esac
