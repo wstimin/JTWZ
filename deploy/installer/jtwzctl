@@ -375,9 +375,10 @@ uninstall() {
   if [[ "$mode" == purge && -d "$APP_DIR/data" ]]; then rm -rf "$APP_DIR/data"; fi
   rm -rf "$APP_DIR"
   systemctl disable --now jtwz-update.path >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/jtwz-update.path /etc/systemd/system/jtwz-update-apply.service
+  systemctl disable --now jtwz-domain.path >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/jtwz-update.path /etc/systemd/system/jtwz-update-apply.service /etc/systemd/system/jtwz-domain.path /etc/systemd/system/jtwz-domain-apply.service
   systemctl daemon-reload
-  rm -f /usr/local/bin/jtwzctl /usr/local/bin/jt /usr/local/bin/jtwz-update /usr/local/bin/jtwz-update-dispatch /usr/local/bin/jtwz-domain /etc/sudoers.d/jtwz-update
+  rm -f /usr/local/bin/jtwzctl /usr/local/bin/jt /usr/local/bin/jtwz-update /usr/local/bin/jtwz-update-dispatch /usr/local/bin/jtwz-domain /usr/local/bin/jtwz-domain-dispatch /etc/sudoers.d/jtwz-update
   if [[ "$mode" == purge ]] && id -u jtwz >/dev/null 2>&1; then userdel jtwz || true; fi
   say 'JTWZ 程序已卸载。SSL 证书不会被自动删除，如需清理请使用 certbot delete。'
 }

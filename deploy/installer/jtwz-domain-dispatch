@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+APP_DIR="${JTWZ_APP_DIR:-/opt/jtwz}"
+QUEUE_DIR="$APP_DIR/data/domain-jobs"
+REQUEST_FILE="$QUEUE_DIR/apply.request"
+DOMAIN_EXECUTOR='/usr/local/bin/jtwz-domain'
+
+die() { printf '[JTWZ Domain Dispatch][错误] %s\n' "$*" >&2; exit 1; }
+valid_action() { [[ "$1" =~ ^(route|ensure|remove|purge)$ ]]; }
+valid_hostname() { [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; }
+
+install -d -m 750 "$QUEUE_DIR"
+
+if [[ "${1:-}" == '--apply' ]]; then
+  [[ "$(id -u)" == 0 ]] || die '域名应用服务必须由 root 运行。'
+  [[ -f "$REQUEST_FILE" ]] || exit 0
+  read -r job_id action hostname < "$REQUEST_FILE"
+  rm -f "$REQUEST_FILE"
+  valid_action "$action" || die '域名操作无效。'
+  valid_hostname "$hostname" || die '域名格式无效。'
+  [[ -x "$DOMAIN_EXECUTOR" ]] || die '缺少域名执行器。'
+  result_file="$QUEUE_DIR/$job_id.result"
+  temporary="$result_file.tmp"
+  set +e
+  output="$($DOMAIN_EXECUTOR "$action" "$hostname" 2>&1)"
+  status=$?
+  set -e
+  { printf '%s\n' "$status"; printf '%s\n' "$output"; } > "$temporary"
+  chown root:jtwz "$temporary" 2>/dev/null || true
+  chmod 640 "$temporary"
+  mv -f "$temporary" "$result_file"
+  exit 0
+fi
+
+action="${1:-}"
+hostname="${2:-}"
+valid_action "$action" || die '操作仅支持 route、ensure、remove 或 purge。'
+valid_hostname "$hostname" || die '域名格式无效。'
+command -v flock >/dev/null 2>&1 || die '缺少 flock，无法提交域名任务。'
+exec 9>"$QUEUE_DIR/submit.lock"
+flock -w 10 9 || die '另一个域名任务正在提交，请稍后重试。'
+job_id="$(date +%s)-$$-$RANDOM"
+result_file="$QUEUE_DIR/$job_id.result"
+temporary="$REQUEST_FILE.$$.tmp"
+printf '%s %s %s\n' "$job_id" "$action" "$hostname" > "$temporary"
+mv -f "$temporary" "$REQUEST_FILE"
+flock -u 9
+
+for _ in $(seq 1 2400); do
+  if [[ -f "$result_file" ]]; then
+    IFS= read -r status < "$result_file"
+    output="$(tail -n +2 "$result_file")"
+    rm -f "$result_file"
+    [[ "$status" == 0 ]] || die "${output:-域名执行器失败。}"
+    printf '%s\n' "$output"
+    exit 0
+  fi
+  sleep 0.1
+done
+die '域名操作等待超时。'

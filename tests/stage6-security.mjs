@@ -123,6 +123,7 @@ try {
   const updater = readFileSync(resolve(root, 'deploy/installer/jtwz-update'), 'utf8')
   const updateDispatcher = readFileSync(resolve(root, 'deploy/installer/jtwz-update-dispatch'), 'utf8')
   const domainExecutor = readFileSync(resolve(root, 'deploy/installer/jtwz-domain'), 'utf8')
+  const domainDispatcher = readFileSync(resolve(root, 'deploy/installer/jtwz-domain-dispatch'), 'utf8')
   assert.match(installer, /User=jtwz/)
   assert.match(installer, /ProtectSystem=strict/)
   assert.match(installer, /sudoers\.d\/jtwz-update/)
@@ -134,6 +135,8 @@ try {
   assert.match(updateDispatcher, /apply\.request/)
   assert.match(installer, /jtwz-update\.path/)
   assert.match(domainExecutor, /certbot --nginx --non-interactive/)
+  assert.match(domainDispatcher, /domain-jobs/)
+  assert.match(installer, /jtwz-domain\.path/)
 
   console.log('stage6: RBAC, CSRF, request IDs, 2FA, sessions, login alerts, audit metadata and low-privilege deployment passed')
   if (serverError) assert.doesNotMatch(serverError, /Error|Exception/)

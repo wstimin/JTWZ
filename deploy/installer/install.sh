@@ -32,8 +32,8 @@ CERTIFICATE_PROVIDER_VALUE='manual'
 if [[ "$PANEL" != '1panel' ]]; then
   UPDATE_APPLY_COMMAND_VALUE='/usr/local/bin/jtwz-update-dispatch'
   UPDATE_APPLY_ARGS_JSON_VALUE='[]'
-  DOMAIN_APPLY_COMMAND_VALUE='/usr/bin/sudo'
-  DOMAIN_APPLY_ARGS_JSON_VALUE='["/usr/local/bin/jtwz-domain"]'
+  DOMAIN_APPLY_COMMAND_VALUE='/usr/local/bin/jtwz-domain-dispatch'
+  DOMAIN_APPLY_ARGS_JSON_VALUE='[]'
 else
   UPDATE_APPLY_COMMAND_VALUE=''
 fi
@@ -398,6 +398,35 @@ EOF
   systemctl enable --now jtwz-update.path
 }
 
+write_domain_dispatch_units() {
+  [[ "$PANEL" != '1panel' ]] || return 0
+  cat > /etc/systemd/system/jtwz-domain-apply.service <<EOF
+[Unit]
+Description=JTWZ privileged domain and certificate apply service
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/jtwz-domain-dispatch --apply
+User=root
+Group=root
+UMask=0027
+EOF
+  cat > /etc/systemd/system/jtwz-domain.path <<EOF
+[Unit]
+Description=Watch for JTWZ domain and certificate requests
+
+[Path]
+PathExists=$APP_DIR/data/domain-jobs/apply.request
+Unit=jtwz-domain-apply.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now jtwz-domain.path
+}
+
 write_nginx() {
   [[ "$USE_REVERSE_PROXY" == 'true' && "$PANEL" != '1panel' ]] || return 0
   command -v nginx >/dev/null || die '当前配置需要 Nginx 反向代理，但服务器未安装 Nginx。'
@@ -478,14 +507,14 @@ main() {
   install_reverse_proxy_tools
   select_access_mode
   install_application
-  if [[ -f "$SCRIPT_DIR/jtwz-update" && -f "$SCRIPT_DIR/jtwz-update-dispatch" && -f "$SCRIPT_DIR/jtwz-domain" && "$PANEL" != '1panel' ]]; then
+  if [[ -f "$SCRIPT_DIR/jtwz-update" && -f "$SCRIPT_DIR/jtwz-update-dispatch" && -f "$SCRIPT_DIR/jtwz-domain" && -f "$SCRIPT_DIR/jtwz-domain-dispatch" && "$PANEL" != '1panel' ]]; then
     install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-update" /usr/local/bin/jtwz-update
     install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-update-dispatch" /usr/local/bin/jtwz-update-dispatch
     install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-domain" /usr/local/bin/jtwz-domain
-    printf 'jtwz ALL=(root) NOPASSWD: /usr/local/bin/jtwz-domain *\n' > /etc/sudoers.d/jtwz-update
-    chmod 440 /etc/sudoers.d/jtwz-update
-    visudo -cf /etc/sudoers.d/jtwz-update >/dev/null || die '更新执行器 sudo 权限校验失败。'
+    install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-domain-dispatch" /usr/local/bin/jtwz-domain-dispatch
+    rm -f /etc/sudoers.d/jtwz-update
     write_update_dispatch_units
+    write_domain_dispatch_units
   fi
   install_panel_runtime
   if [[ -f "$SCRIPT_DIR/jtwzctl" ]]; then
