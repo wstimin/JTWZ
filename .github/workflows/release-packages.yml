@@ -47,14 +47,14 @@ jobs:
           make_app "artifacts/jtwz-baota-v$VERSION"
           cp deploy/baota/install.sh deploy/baota/manifest.json "artifacts/jtwz-baota-v$VERSION/"
           chmod +x "artifacts/jtwz-baota-v$VERSION/install.sh" "artifacts/jtwz-baota-v$VERSION/installer/"*
-          printf '%s\n' '# 宝塔安装包' '' '解压后执行 sudo ./install.sh，安装向导会完成域名、管理员和 Nginx 配置。' > "artifacts/jtwz-baota-v$VERSION/README.md"
+          cp deploy/baota/README.md "artifacts/jtwz-baota-v$VERSION/README.md"
           (cd artifacts && zip -qr "jtwz-baota-v$VERSION.zip" "jtwz-baota-v$VERSION")
 
           mkdir -p "artifacts/jtwz-1panel-v$VERSION"
           make_app "artifacts/jtwz-1panel-v$VERSION"
           cp deploy/1panel/install.sh deploy/1panel/manifest.json deploy/1panel/Dockerfile deploy/1panel/docker-compose.yml "artifacts/jtwz-1panel-v$VERSION/"
           chmod +x "artifacts/jtwz-1panel-v$VERSION/install.sh" "artifacts/jtwz-1panel-v$VERSION/installer/"*
-          printf '%s\n' '# 1Panel 安装包' '' '解压后执行 sudo ./install.sh，安装向导会写入 Compose 环境并启动容器。' > "artifacts/jtwz-1panel-v$VERSION/README.md"
+          cp deploy/1panel/README.md "artifacts/jtwz-1panel-v$VERSION/README.md"
           tar -C artifacts -czf "artifacts/jtwz-1panel-v$VERSION.tar.gz" "jtwz-1panel-v$VERSION"
 
           mkdir -p "artifacts/jtwz-one-click-v$VERSION"
@@ -70,7 +70,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: jtwz-installation-packages
-          path: artifacts/*.{zip,tar.gz,SHA256SUMS,VERSION}
+          path: |
+            artifacts/*.zip
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS
+            artifacts/VERSION
 
       - name: Publish GitHub release assets
         if: startsWith(github.ref, 'refs/tags/')

@@ -307,10 +307,10 @@ main() {
   select_access_mode
   install_application
   install_panel_runtime
-  if [[ -f "$PACKAGE_DIR/jtwzctl" ]]; then
-    control_script="$PACKAGE_DIR/jtwzctl"
-  elif [[ -f "$SCRIPT_DIR/jtwzctl" ]]; then
+  if [[ -f "$SCRIPT_DIR/jtwzctl" ]]; then
     control_script="$SCRIPT_DIR/jtwzctl"
+  elif [[ -f "$PACKAGE_DIR/jtwzctl" ]]; then
+    control_script="$PACKAGE_DIR/jtwzctl"
   fi
   if [[ -n "$control_script" ]]; then
     install -m 755 "$control_script" /usr/local/bin/jtwzctl

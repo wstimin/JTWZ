@@ -11,8 +11,8 @@ bash <(curl -fsSL -H 'Accept: application/vnd.github.raw' 'https://api.github.co
 ## 使用 Release 压缩包
 
 ```bash
-tar -xzf jtwz-one-click-v1.0.0.tar.gz
-cd jtwz-one-click-v1.0.0
+tar -xzf jtwz-one-click-vX.Y.Z.tar.gz
+cd jtwz-one-click-vX.Y.Z
 sudo ./install.sh
 ```
 

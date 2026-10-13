@@ -112,8 +112,8 @@ VITE_API_BASE_URL=https://api.example.com
 ## 7. 发布新版本
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
-GitHub Actions 会构建三种安装包并发布 `SHA256SUMS`。发布前请同步 `package.json`、安装包 manifest 和 `server/backup.ts` 的最低兼容版本。
+GitHub Actions 会构建三种安装包并发布 `SHA256SUMS`。每次正式发布前必须先递增 `package.json`、`package-lock.json` 和安装包 manifest 的版本；只有备份格式确实不再兼容旧版本时，才调整 `server/backup.ts` 的最低兼容版本。
