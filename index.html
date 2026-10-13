@@ -13,14 +13,6 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,600;0,700;1,600&display=swap"
       rel="stylesheet"
     />
-    <script>
-      (() => {
-        const saved = localStorage.getItem('jtwz.public.theme');
-        const system = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-        document.documentElement.dataset.theme = saved || system;
-        document.documentElement.dataset.surface = 'public';
-      })();
-    </script>
     <title>JTWZ · 数字入口管理平台</title>
   </head>
   <body>

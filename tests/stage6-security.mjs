@@ -124,6 +124,10 @@ try {
   const updateDispatcher = readFileSync(resolve(root, 'deploy/installer/jtwz-update-dispatch'), 'utf8')
   const domainExecutor = readFileSync(resolve(root, 'deploy/installer/jtwz-domain'), 'utf8')
   const domainDispatcher = readFileSync(resolve(root, 'deploy/installer/jtwz-domain-dispatch'), 'utf8')
+  const sharedStyles = readFileSync(resolve(root, 'src/styles.css'), 'utf8')
+  const themeContext = readFileSync(resolve(root, 'src/contexts/ThemeContext.tsx'), 'utf8')
+  const htmlEntries = ['index.html', 'apps/public/index.html', 'apps/admin/index.html']
+    .map((path) => readFileSync(resolve(root, path), 'utf8'))
   assert.match(installer, /User=jtwz/)
   assert.match(installer, /ProtectSystem=strict/)
   assert.match(installer, /sudoers\.d\/jtwz-update/)
@@ -142,6 +146,12 @@ try {
   assert.match(readFileSync(resolve(root, 'server/index.ts'), 'utf8'), /provider === 'certbot'[\s\S]*otherLive/)
   assert.match(domainDispatcher, /domain-jobs/)
   assert.match(installer, /jtwz-domain\.path/)
+  assert.match(sharedStyles, /--native-menu-bg/)
+  assert.match(sharedStyles, /select option:checked/)
+  assert.match(sharedStyles, /color-scheme: dark/)
+  assert.match(themeContext, /localStorage\.getItem\(storageKey\)/)
+  assert.match(themeContext, /useLayoutEffect/)
+  assert.ok(htmlEntries.every((html) => !html.includes('<script>')), 'theme bootstrapping must comply with the inline-script CSP')
 
   console.log('stage6: RBAC, CSRF, request IDs, 2FA, sessions, login alerts, audit metadata and low-privilege deployment passed')
   if (serverError) assert.doesNotMatch(serverError, /Error|Exception/)

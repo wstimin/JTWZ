@@ -14,14 +14,14 @@
   padding: 10px 14px;
   align-items: center;
   gap: 10px;
-  border: 1px solid color-mix(in srgb, #d69a32 48%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--warning) 48%, var(--border));
   border-radius: 12px;
   color: var(--text-primary);
-  background: color-mix(in srgb, #d69a32 10%, var(--bg-primary));
+  background: color-mix(in srgb, var(--warning) 10%, var(--bg-primary));
   font-size: 0.78rem;
 }
 
-.public-notice svg { width: 17px; color: #b87812; }
+.public-notice svg { width: 17px; color: var(--warning); }
 .public-notice button { border: 0; color: var(--accent-hover); background: transparent; font: inherit; font-weight: 700; cursor: pointer; }
 
 .public-state-page { min-height: 100vh; min-height: 100svh; }
