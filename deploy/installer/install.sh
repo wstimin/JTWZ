@@ -35,7 +35,8 @@ if [[ "$PANEL" != '1panel' ]]; then
   DOMAIN_APPLY_COMMAND_VALUE='/usr/local/bin/jtwz-domain-dispatch'
   DOMAIN_APPLY_ARGS_JSON_VALUE='[]'
 else
-  UPDATE_APPLY_COMMAND_VALUE=''
+  UPDATE_APPLY_COMMAND_VALUE='/usr/local/bin/jtwz-update-request'
+  UPDATE_APPLY_ARGS_JSON_VALUE='[]'
 fi
 say() { printf '\n[JTWZ] %s\n' "$*"; }
 die() { printf '\n[JTWZ][错误] %s\n' "$*" >&2; exit 1; }
@@ -319,7 +320,7 @@ remove_multiline_env_key() {
 
 install_application() {
   [[ -d "$SOURCE_DIR" ]] || die "未找到应用文件目录：$SOURCE_DIR"
-  [[ "$PANEL" == '1panel' ]] || install_node
+  install_node
   [[ "$PANEL" == '1panel' ]] && TARGET_DIR="$APP_DIR/app"
   if [[ "$PANEL" == '1panel' ]]; then
     ENV_FILE="$TARGET_DIR/.env"
@@ -388,7 +389,6 @@ EOF
 }
 
 write_update_dispatch_units() {
-  [[ "$PANEL" != '1panel' ]] || return 0
   cat > /etc/systemd/system/jtwz-update-apply.service <<EOF
 [Unit]
 Description=JTWZ signed update apply service
@@ -497,16 +497,35 @@ verify_service() {
     fi
     sleep 1
   done
-  journalctl -u "$SERVICE_NAME" --no-pager -n 50 >&2 || true
+  if [[ -f "$APP_DIR/docker-compose.yml" ]]; then
+    (cd "$APP_DIR" && docker compose logs --tail 50) >&2 || true
+  else
+    journalctl -u "$SERVICE_NAME" --no-pager -n 50 >&2 || true
+  fi
   die "服务未能在 127.0.0.1:$API_PORT 正常启动，请根据上方日志检查。"
 }
 
 install_panel_runtime() {
   if [[ "$PANEL" == '1panel' && -f "$PACKAGE_DIR/docker-compose.yml" && -f "$PACKAGE_DIR/Dockerfile" ]]; then
     say '检测到 1Panel 包，写入 Compose 配置并启动容器。'
+    [[ -f "$PACKAGE_DIR/jtwz-update-request" ]] || die '1Panel 包缺少容器更新请求器，请重新下载完整安装包。'
+    local current_data_source='' expected_data_source
+    expected_data_source="$(realpath -m "$APP_DIR/data")"
+    if docker inspect jtwz >/dev/null 2>&1; then
+      current_data_source="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/opt/jtwz/data"}}{{.Source}}{{end}}{{end}}' jtwz 2>/dev/null || true)"
+    fi
+    if [[ -n "$current_data_source" && "$(realpath -m "$current_data_source")" != "$expected_data_source" ]]; then
+      say '正在把旧版 1Panel Docker 数据卷迁移到可安全更新的共享目录。'
+      if [[ -f "$APP_DIR/docker-compose.yml" ]]; then (cd "$APP_DIR" && docker compose down); else docker stop jtwz >/dev/null; fi
+      install -d -m 750 "$APP_DIR/data"
+      cp -a "$current_data_source"/. "$APP_DIR/data"/
+    fi
+    chown -R 1000:1000 "$APP_DIR/data"
     cp -a "$PACKAGE_DIR/docker-compose.yml" "$APP_DIR/docker-compose.yml"
     cp -a "$PACKAGE_DIR/Dockerfile" "$APP_DIR/Dockerfile"
+    cp -a "$PACKAGE_DIR/jtwz-update-request" "$APP_DIR/jtwz-update-request"
     (cd "$APP_DIR" && docker compose up -d --build)
+    verify_service
   else
     write_systemd
     write_nginx
@@ -525,13 +544,15 @@ main() {
   install_reverse_proxy_tools
   select_access_mode
   install_application
-  if [[ -f "$SCRIPT_DIR/jtwz-update" && -f "$SCRIPT_DIR/jtwz-update-dispatch" && -f "$SCRIPT_DIR/jtwz-domain" && -f "$SCRIPT_DIR/jtwz-domain-dispatch" && "$PANEL" != '1panel' ]]; then
+  if [[ -f "$SCRIPT_DIR/jtwz-update" && -f "$SCRIPT_DIR/jtwz-update-dispatch" ]]; then
     install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-update" /usr/local/bin/jtwz-update
     install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-update-dispatch" /usr/local/bin/jtwz-update-dispatch
-    install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-domain" /usr/local/bin/jtwz-domain
-    install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-domain-dispatch" /usr/local/bin/jtwz-domain-dispatch
     rm -f /etc/sudoers.d/jtwz-update
     write_update_dispatch_units
+  fi
+  if [[ -f "$SCRIPT_DIR/jtwz-domain" && -f "$SCRIPT_DIR/jtwz-domain-dispatch" && "$PANEL" != '1panel' ]]; then
+    install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-domain" /usr/local/bin/jtwz-domain
+    install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-domain-dispatch" /usr/local/bin/jtwz-domain-dispatch
     write_domain_dispatch_units
   fi
   install_panel_runtime

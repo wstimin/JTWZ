@@ -12,8 +12,8 @@ ROLLBACK=''
 TARGET_DIR="$APP_DIR"
 SWITCHED='false'
 CONFIG_ENV="$APP_DIR/data/config.env"
-SERVICE_USER="${JTWZ_SERVICE_USER:-jtwz}"
-SERVICE_GROUP="${JTWZ_SERVICE_GROUP:-jtwz}"
+SERVICE_USER="${JTWZ_SERVICE_USER:-}"
+SERVICE_GROUP="${JTWZ_SERVICE_GROUP:-}"
 
 say() { printf '\n[JTWZ Update] %s\n' "$*"; }
 die() { printf '[JTWZ Update][错误] %s\n' "$*" >&2; exit 1; }
@@ -49,7 +49,14 @@ if (!publicKey || !crypto.verify(null, Buffer.from(payload), publicKey, Buffer.f
 NODE
 }
 
-if [[ -f "$APP_DIR/docker-compose.yml" && -d "$APP_DIR/app" ]]; then TARGET_DIR="$APP_DIR/app"; fi
+if [[ -f "$APP_DIR/docker-compose.yml" && -d "$APP_DIR/app" ]]; then
+  TARGET_DIR="$APP_DIR/app"
+  SERVICE_USER="${SERVICE_USER:-1000}"
+  SERVICE_GROUP="${SERVICE_GROUP:-1000}"
+else
+  SERVICE_USER="${SERVICE_USER:-jtwz}"
+  SERVICE_GROUP="${SERVICE_GROUP:-jtwz}"
+fi
 [[ -f "$CONFIG_ENV" ]] || CONFIG_ENV="$APP_DIR/.env"
 if [[ -f "$CONFIG_ENV" ]]; then API_PORT="$(grep -E '^API_PORT=' "$CONFIG_ENV" | tail -n 1 | cut -d= -f2- || true)"; fi
 API_PORT="${API_PORT:-8787}"
@@ -64,7 +71,7 @@ const payload = { status: process.env.JTWZ_UPDATE_STATUS, detail: process.env.JT
 fs.writeFileSync(`${target}.tmp`, JSON.stringify(payload, null, 2), { mode: 0o600 })
 fs.renameSync(`${target}.tmp`, target)
 NODE
-  if id -u "$SERVICE_USER" >/dev/null 2>&1; then chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/state.json"; fi
+  if [[ "$SERVICE_USER" =~ ^[0-9]+$ ]] || id -u "$SERVICE_USER" >/dev/null 2>&1; then chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/state.json"; fi
   chmod 640 "$STATE_DIR/state.json"
 }
 
@@ -84,7 +91,7 @@ sanitize_legacy_public_key() {
 }
 
 prepare_runtime_permissions() {
-  if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then return 0; fi
+  if [[ ! "$SERVICE_USER" =~ ^[0-9]+$ ]] && ! id -u "$SERVICE_USER" >/dev/null 2>&1; then return 0; fi
   chown -R "root:$SERVICE_GROUP" "$@"
   chmod -R u+rwX,g+rX,o-rwx "$@"
 }

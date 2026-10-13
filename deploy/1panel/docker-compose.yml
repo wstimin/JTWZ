@@ -9,7 +9,7 @@ services:
     ports:
       - "127.0.0.1:8787:8787"
     volumes:
-      - jtwz-data:/opt/jtwz/data
+      - ./data:/opt/jtwz/data
     tmpfs:
       - /tmp:size=128m,mode=1777
     security_opt:
@@ -21,6 +21,3 @@ services:
       retries: 5
       start_period: 20s
     stop_grace_period: 30s
-
-volumes:
-  jtwz-data:

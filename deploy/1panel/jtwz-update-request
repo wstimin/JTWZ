@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+artifact="${1:-}"
+case "$artifact" in
+  /opt/jtwz/data/updates/*) ;;
+  *) printf '%s\n' 'invalid update artifact' >&2; exit 1 ;;
+esac
+
+umask 027
+temporary="/opt/jtwz/data/updates/apply.request.$$"
+printf '%s\n' "$artifact" > "$temporary"
+mv -f "$temporary" /opt/jtwz/data/updates/apply.request

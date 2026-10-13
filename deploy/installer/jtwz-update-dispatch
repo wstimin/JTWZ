@@ -6,6 +6,8 @@ UPDATE_DIR="$APP_DIR/data/updates"
 REQUEST_FILE="$UPDATE_DIR/apply.request"
 LOG_FILE="$UPDATE_DIR/system-update.log"
 UPDATER='/usr/local/bin/jtwz-update'
+STATE_OWNER='root:jtwz'
+[[ -f "$APP_DIR/docker-compose.yml" ]] && STATE_OWNER='1000:1000'
 
 die() { printf '[JTWZ Update Dispatch][错误] %s\n' "$*" >&2; exit 1; }
 
@@ -22,7 +24,7 @@ if [[ "${1:-}" == '--apply' ]]; then
   allowed="$(realpath "$UPDATE_DIR")/"
   [[ "$resolved" == "$allowed"* ]] || die '更新包不在受控目录中。'
   touch "$LOG_FILE"
-  chown root:jtwz "$LOG_FILE" 2>/dev/null || true
+  chown "$STATE_OWNER" "$LOG_FILE" 2>/dev/null || true
   chmod 640 "$LOG_FILE"
   printf '\n[%s] 开始应用 %s\n' "$(date -Is)" "$(basename "$resolved")" >> "$LOG_FILE"
   exec > >(tee -a "$LOG_FILE") 2>&1

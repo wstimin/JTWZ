@@ -68,14 +68,16 @@ jobs:
           mkdir -p "artifacts/jtwz-baota-v$VERSION"
           make_app "artifacts/jtwz-baota-v$VERSION"
           cp deploy/baota/install.sh deploy/baota/manifest.json "artifacts/jtwz-baota-v$VERSION/"
+          node -e "const fs=require('fs');const p=process.argv[1];const m=JSON.parse(fs.readFileSync(p));m.version=process.argv[2];fs.writeFileSync(p,JSON.stringify(m,null,2)+'\\n')" "artifacts/jtwz-baota-v$VERSION/manifest.json" "$VERSION"
           chmod +x "artifacts/jtwz-baota-v$VERSION/install.sh" "artifacts/jtwz-baota-v$VERSION/installer/"*
           cp deploy/baota/README.md "artifacts/jtwz-baota-v$VERSION/README.md"
           (cd artifacts && zip -qr "jtwz-baota-v$VERSION.zip" "jtwz-baota-v$VERSION")
 
           mkdir -p "artifacts/jtwz-1panel-v$VERSION"
           make_app "artifacts/jtwz-1panel-v$VERSION"
-          cp deploy/1panel/install.sh deploy/1panel/manifest.json deploy/1panel/Dockerfile deploy/1panel/docker-compose.yml "artifacts/jtwz-1panel-v$VERSION/"
-          chmod +x "artifacts/jtwz-1panel-v$VERSION/install.sh" "artifacts/jtwz-1panel-v$VERSION/installer/"*
+          cp deploy/1panel/install.sh deploy/1panel/manifest.json deploy/1panel/Dockerfile deploy/1panel/docker-compose.yml deploy/1panel/jtwz-update-request "artifacts/jtwz-1panel-v$VERSION/"
+          node -e "const fs=require('fs');const p=process.argv[1];const m=JSON.parse(fs.readFileSync(p));m.version=process.argv[2];fs.writeFileSync(p,JSON.stringify(m,null,2)+'\\n')" "artifacts/jtwz-1panel-v$VERSION/manifest.json" "$VERSION"
+          chmod +x "artifacts/jtwz-1panel-v$VERSION/install.sh" "artifacts/jtwz-1panel-v$VERSION/jtwz-update-request" "artifacts/jtwz-1panel-v$VERSION/installer/"*
           cp deploy/1panel/README.md "artifacts/jtwz-1panel-v$VERSION/README.md"
           tar -C artifacts -czf "artifacts/jtwz-1panel-v$VERSION.tar.gz" "jtwz-1panel-v$VERSION"
 

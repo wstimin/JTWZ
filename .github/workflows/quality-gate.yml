@@ -78,6 +78,7 @@ jobs:
           bash -n deploy/installer/jtwz-update-dispatch
           bash -n deploy/installer/jtwz-domain
           bash -n deploy/installer/jtwz-domain-dispatch
+          sh -n deploy/1panel/jtwz-update-request
           bash tests/one-click-launcher.sh
       - name: Validate Compose manifests
         shell: bash
@@ -88,6 +89,12 @@ jobs:
           mkdir -p deploy/1panel/app
           cp .env.example deploy/1panel/app/.env
           docker compose -f deploy/1panel/docker-compose.yml config --quiet
+      - name: Build 1Panel update-capable image
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a package.json package-lock.json dist dist-server deploy/1panel/app/
+          docker build -f deploy/1panel/Dockerfile -t jtwz:1panel-quality deploy/1panel
       - name: Build hardened Docker image
         run: docker build -f deploy/docker/Dockerfile -t jtwz:quality-gate .
       - name: Run container health check

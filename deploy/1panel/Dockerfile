@@ -5,6 +5,7 @@ COPY app/package*.json ./
 RUN npm ci --omit=dev
 COPY app/dist ./dist
 COPY app/dist-server ./dist-server
+COPY --chmod=755 jtwz-update-request /usr/local/bin/jtwz-update-request
 RUN mkdir -p data/backups data/storage data/site-releases data/temp data/brand-assets data/task-artifacts data/updates \
   && chown -R node:node /opt/jtwz
 USER node
