@@ -1,7 +1,7 @@
 {
-  "name": "aurelia-platform",
+  "name": "jtwz-platform",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.0.3",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n PUBLIC,ADMIN,API -c yellow,blue,green \"npm:dev:public\" \"npm:dev:admin\" \"npm:dev:api\"",
@@ -17,6 +17,9 @@
     "preview:admin": "vite preview --config vite.admin.config.ts",
     "start": "node dist-server/index.js",
     "test": "node tests/smoke.mjs",
+    "test:stage4": "node tests/stage4-lifecycle.mjs",
+    "test:stage5": "node tests/stage5-recovery-update.mjs",
+    "test:stage6": "node tests/stage6-security.mjs",
     "check": "tsc -b --pretty false && tsc -p tsconfig.server.json --pretty false --noEmit"
   },
   "dependencies": {

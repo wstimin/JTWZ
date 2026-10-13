@@ -1,0 +1,4 @@
+{$JTWZ_DOMAIN:localhost} {
+  encode zstd gzip
+  reverse_proxy jtwz:8787
+}

@@ -7,15 +7,32 @@ PACKAGE_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 SOURCE_DIR="${JTWZ_SOURCE_DIR:-$PACKAGE_DIR/app}"
 APP_DIR="${JTWZ_APP_DIR:-/opt/jtwz}"
 SERVICE_NAME="jtwz"
-ENV_FILE="$APP_DIR/.env"
+LEGACY_ENV_FILE="$APP_DIR/.env"
+if [[ "$PANEL" == '1panel' ]]; then
+  ENV_FILE="$APP_DIR/app/.env"
+else
+  ENV_FILE="$APP_DIR/data/config.env"
+  [[ -f "$ENV_FILE" ]] || [[ ! -f "$LEGACY_ENV_FILE" ]] || ENV_FILE="$LEGACY_ENV_FILE"
+fi
 TARGET_DIR="$APP_DIR"
 API_PORT="${JTWZ_API_PORT:-8787}"
 API_BIND_HOST='127.0.0.1'
 USE_REVERSE_PROXY='false'
 PUBLIC_BASE_URL=''
 ADMIN_BASE_URL=''
+ADMIN_BASE_PATH='/admin'
 EXISTING_INSTALL='false'
+UPDATE_PUBLIC_KEY_VALUE=''
+UPDATE_APPLY_COMMAND_VALUE='/usr/local/bin/jtwz-update'
+UPDATE_APPLY_ARGS_JSON_VALUE='[]'
 [[ -d "$SOURCE_DIR" ]] || SOURCE_DIR="$(cd -- "$PACKAGE_DIR/.." && pwd)"
+if [[ "$PANEL" != '1panel' ]]; then
+  UPDATE_APPLY_COMMAND_VALUE='/usr/bin/sudo'
+  UPDATE_APPLY_ARGS_JSON_VALUE='["/usr/local/bin/jtwz-update"]'
+else
+  UPDATE_APPLY_COMMAND_VALUE=''
+fi
+if [[ -f "$SCRIPT_DIR/update-public-key.pem" ]]; then UPDATE_PUBLIC_KEY_VALUE="$(awk '{printf "%s\\n", $0}' "$SCRIPT_DIR/update-public-key.pem")"; fi
 
 say() { printf '\n[JTWZ] %s\n' "$*"; }
 die() { printf '\n[JTWZ][错误] %s\n' "$*" >&2; exit 1; }
@@ -81,6 +98,14 @@ detect_public_ip() {
 validate_public_address() {
   local value="${1:-}"
   is_public_address "$value" || die "必须使用公网 IP 或公网域名，当前地址无效：${value:-<空>}"
+}
+
+normalize_admin_base_path() {
+  local value="${1:-/admin}"
+  value="/${value#/}"; value="${value%/}"; value="${value,,}"
+  [[ "$value" =~ ^/[a-z0-9][a-z0-9_-]{3,63}$ ]] || die '管理入口后缀需为 4-64 位字母、数字、短横线或下划线。'
+  case "$value" in /api|/assets|/admin-assets|/downloads|/preview|/login) die '该管理入口后缀属于系统保留路径。' ;; esac
+  printf '%s' "$value"
 }
 
 origin_host() {
@@ -157,9 +182,10 @@ prompt_settings() {
   fi
   PUBLIC_DOMAIN="$(ask '公开访问地址（自动识别结果，可改为公网域名）' "${existing_domain:-$detected_ip}")"
   ADMIN_DOMAIN="$(ask '管理访问地址（默认与公开地址相同）' "${ADMIN_DOMAIN:-$PUBLIC_DOMAIN}")"
+  ADMIN_BASE_PATH="$(normalize_admin_base_path "$(ask '管理后台入口后缀' '/admin')")"
   ADMIN_USERNAME="$(ask '管理员账号' "$existing_admin")"
-  ADMIN_PASSWORD="$(ask_secret '管理员密码（至少 12 位）')"
-  [[ "${#ADMIN_PASSWORD}" -ge 12 ]] || die '管理员密码至少需要 12 位。'
+  ADMIN_PASSWORD="$(ask_secret '管理员密码（至少 6 位）')"
+  [[ "${#ADMIN_PASSWORD}" -ge 6 ]] || die '管理员密码至少需要 6 位。'
   APP_SECRET="$(openssl rand -hex 32)"
   SUPPORT_EMAIL="$(ask '支持邮箱（可留空）' '')"
 }
@@ -168,6 +194,7 @@ load_existing_env() {
   PUBLIC_DOMAIN="$(grep -E '^(PUBLIC_ADDRESS|PUBLIC_DOMAIN)=' "$ENV_FILE" | head -n 1 | cut -d= -f2- || true)"
   [[ -n "$PUBLIC_DOMAIN" ]] || PUBLIC_DOMAIN="$(grep -E '^PUBLIC_APP_ORIGIN=' "$ENV_FILE" | cut -d= -f2- | sed -E 's#^https?://##; s#/$##' || true)"
   ADMIN_DOMAIN="$(grep -E '^(ADMIN_ADDRESS|ADMIN_DOMAIN)=' "$ENV_FILE" | head -n 1 | cut -d= -f2- || true)"
+  ADMIN_BASE_PATH="$(grep -E '^ADMIN_BASE_PATH=' "$ENV_FILE" | cut -d= -f2- || true)"; ADMIN_BASE_PATH="$(normalize_admin_base_path "${ADMIN_BASE_PATH:-/admin}")"
   ADMIN_USERNAME="$(grep -E '^ADMIN_USERNAME=' "$ENV_FILE" | cut -d= -f2- || true)"
   ADMIN_PASSWORD="$(grep -E '^ADMIN_PASSWORD=' "$ENV_FILE" | cut -d= -f2- || true)"
   APP_SECRET="$(grep -E '^APP_SECRET=' "$ENV_FILE" | cut -d= -f2- || true)"
@@ -177,6 +204,7 @@ load_existing_env() {
 write_env() {
   install -d -m 750 "$APP_DIR/data" "$APP_DIR/data/backups" "$APP_DIR/data/storage" "$APP_DIR/data/site-releases" "$APP_DIR/data/temp" "$APP_DIR/data/brand-assets" "$APP_DIR/data/updates"
   if [[ "$EXISTING_INSTALL" == 'true' ]]; then
+    upsert_env COOKIE_SECURE auto
     upsert_env API_HOST "$API_BIND_HOST"
     upsert_env API_PORT "$API_PORT"
     upsert_env APP_HOST "$API_BIND_HOST"
@@ -184,16 +212,22 @@ write_env() {
     upsert_env ADMIN_ADDRESS "$ADMIN_DOMAIN"
     upsert_env PUBLIC_DOMAIN "$PUBLIC_DOMAIN"
     upsert_env ADMIN_DOMAIN "$ADMIN_DOMAIN"
+    upsert_env ADMIN_BASE_PATH "$ADMIN_BASE_PATH"
     upsert_env PUBLIC_URL "$PUBLIC_BASE_URL"
-    upsert_env ADMIN_LOGIN_URL "$ADMIN_BASE_URL/admin/login"
+    upsert_env ADMIN_LOGIN_URL "$ADMIN_BASE_URL$ADMIN_BASE_PATH/login"
     upsert_env APP_ORIGIN "$PUBLIC_BASE_URL"
     upsert_env PUBLIC_APP_ORIGIN "$PUBLIC_BASE_URL"
     upsert_env ADMIN_APP_ORIGIN "$ADMIN_BASE_URL"
+    upsert_env UPDATE_MANIFEST_URL 'https://github.com/wstimin/JTWZ/releases/latest/download/update-manifest.json'
+    [[ -z "$UPDATE_PUBLIC_KEY_VALUE" ]] || upsert_env UPDATE_PUBLIC_KEY "$UPDATE_PUBLIC_KEY_VALUE"
+    upsert_env UPDATE_APPLY_COMMAND "$UPDATE_APPLY_COMMAND_VALUE"
+    upsert_env UPDATE_APPLY_ARGS_JSON "$UPDATE_APPLY_ARGS_JSON_VALUE"
     chmod 600 "$ENV_FILE"
     return
   fi
   cat > "$ENV_FILE" <<EOF
 NODE_ENV=production
+COOKIE_SECURE=auto
 API_HOST=$API_BIND_HOST
 API_PORT=$API_PORT
 APP_HOST=$API_BIND_HOST
@@ -201,8 +235,9 @@ PUBLIC_ADDRESS=$PUBLIC_DOMAIN
 ADMIN_ADDRESS=$ADMIN_DOMAIN
 PUBLIC_DOMAIN=$PUBLIC_DOMAIN
 ADMIN_DOMAIN=$ADMIN_DOMAIN
+ADMIN_BASE_PATH=$ADMIN_BASE_PATH
 PUBLIC_URL=$PUBLIC_BASE_URL
-ADMIN_LOGIN_URL=$ADMIN_BASE_URL/admin/login
+ADMIN_LOGIN_URL=$ADMIN_BASE_URL$ADMIN_BASE_PATH/login
 APP_ORIGIN=$PUBLIC_BASE_URL
 PUBLIC_APP_ORIGIN=$PUBLIC_BASE_URL
 ADMIN_APP_ORIGIN=$ADMIN_BASE_URL
@@ -214,6 +249,10 @@ ALLOW_LOCAL_STORAGE_IN_PRODUCTION=true
 BACKUP_INTERVAL_HOURS=24
 BACKUP_RETENTION_DAYS=30
 SUPPORT_EMAIL=$SUPPORT_EMAIL
+UPDATE_MANIFEST_URL=https://github.com/wstimin/JTWZ/releases/latest/download/update-manifest.json
+UPDATE_PUBLIC_KEY=$UPDATE_PUBLIC_KEY_VALUE
+UPDATE_APPLY_COMMAND=$UPDATE_APPLY_COMMAND_VALUE
+UPDATE_APPLY_ARGS_JSON=$UPDATE_APPLY_ARGS_JSON_VALUE
 EOF
   chmod 600 "$ENV_FILE"
   if [[ "$PANEL" == '1panel' ]]; then ln -sfn "$ENV_FILE" "$APP_DIR/.env"; fi
@@ -236,7 +275,15 @@ install_application() {
   [[ -d "$SOURCE_DIR" ]] || die "未找到应用文件目录：$SOURCE_DIR"
   [[ "$PANEL" == '1panel' ]] || install_node
   [[ "$PANEL" == '1panel' ]] && TARGET_DIR="$APP_DIR/app"
-  ENV_FILE="$TARGET_DIR/.env"
+  if [[ "$PANEL" == '1panel' ]]; then
+    ENV_FILE="$TARGET_DIR/.env"
+  else
+    install -d -m 750 "$APP_DIR/data"
+    if [[ "$EXISTING_INSTALL" == 'true' && -f "$APP_DIR/.env" && ! -f "$APP_DIR/data/config.env" ]]; then
+      cp "$APP_DIR/.env" "$APP_DIR/data/config.env"
+    fi
+    ENV_FILE="$APP_DIR/data/config.env"
+  fi
   install -d -m 755 "$TARGET_DIR"
   cp -a "$SOURCE_DIR"/. "$TARGET_DIR"/
   if [[ "$PANEL" != '1panel' ]]; then
@@ -254,6 +301,11 @@ install_application() {
 }
 
 write_systemd() {
+  id -u jtwz >/dev/null 2>&1 || useradd --system --home-dir /var/lib/jtwz --create-home --shell /usr/sbin/nologin jtwz
+  install -d -o jtwz -g jtwz -m 750 "$APP_DIR/data"
+  chown -R jtwz:jtwz "$APP_DIR/data"
+  chown root:jtwz "$ENV_FILE"
+  chmod 640 "$ENV_FILE"
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
 Description=JTWZ platform API and public service
@@ -263,10 +315,24 @@ After=network.target
 Type=simple
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
+Environment=JTWZ_ENV_FILE=$ENV_FILE
 ExecStart=$(command -v node) $APP_DIR/dist-server/index.js
 Restart=on-failure
 RestartSec=5
-User=root
+User=jtwz
+Group=jtwz
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=$APP_DIR/data
 
 [Install]
 WantedBy=multi-user.target
@@ -287,14 +353,11 @@ server {
   listen 80;
   server_name $domain $admin_domain;
   client_max_body_size 2g;
-  location /api/ { proxy_pass http://127.0.0.1:$API_PORT; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header X-Real-IP \$remote_addr; proxy_request_buffering off; }
-  location /preview/ { proxy_pass http://127.0.0.1:$API_PORT; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header X-Real-IP \$remote_addr; }
-  location /admin { root $APP_DIR/dist; add_header X-Robots-Tag "noindex, nofollow, noarchive" always; try_files \$uri \$uri/ /admin/index.html; }
-  location / { root $APP_DIR/dist/public; try_files \$uri \$uri/ /index.html; }
+  location / { proxy_pass http://127.0.0.1:$API_PORT; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header X-Real-IP \$remote_addr; proxy_request_buffering off; }
 }
 EOF
   nginx -t && systemctl reload nginx
-  say "Nginx 已配置：$domain（管理入口：$admin_domain/admin/login）"
+  say "Nginx 已配置：$domain（管理入口：$admin_domain$ADMIN_BASE_PATH/login）"
 }
 
 configure_firewall() {
@@ -344,8 +407,15 @@ main() {
   if [[ -f "$ENV_FILE" && -s "$ENV_FILE" ]]; then EXISTING_INSTALL='true'; load_existing_env; else prompt_settings; fi
   validate_public_address "$PUBLIC_DOMAIN"
   validate_public_address "$ADMIN_DOMAIN"
+  ADMIN_BASE_PATH="$(normalize_admin_base_path "$ADMIN_BASE_PATH")"
   select_access_mode
   install_application
+  if [[ -f "$SCRIPT_DIR/jtwz-update" && "$PANEL" != '1panel' ]]; then
+    install -o root -g root -m 755 "$SCRIPT_DIR/jtwz-update" /usr/local/bin/jtwz-update
+    printf 'jtwz ALL=(root) NOPASSWD: /usr/local/bin/jtwz-update *\n' > /etc/sudoers.d/jtwz-update
+    chmod 440 /etc/sudoers.d/jtwz-update
+    visudo -cf /etc/sudoers.d/jtwz-update >/dev/null || die '更新执行器 sudo 权限校验失败。'
+  fi
   install_panel_runtime
   if [[ -f "$SCRIPT_DIR/jtwzctl" ]]; then
     control_script="$SCRIPT_DIR/jtwzctl"
@@ -360,7 +430,7 @@ main() {
   fi
   say '安装完成。'
   say "公开首页：$PUBLIC_BASE_URL/"
-  say "管理登录：$ADMIN_BASE_URL/admin/login"
+  say "管理登录：$ADMIN_BASE_URL$ADMIN_BASE_PATH/login"
   say '交互管理：jt'
   say '查看状态：jt status'
   [[ "$USE_REVERSE_PROXY" == 'false' ]] && say "如果外网无法访问，请在云厂商安全组中放行 TCP 端口 $API_PORT。"

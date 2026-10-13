@@ -2,8 +2,10 @@
 <html lang="zh-CN" data-theme="light">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f7f5f2" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#1a1916" media="(prefers-color-scheme: dark)" />
     <meta name="description" content="统一管理域名跳转、静态网站与软件分发。" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -13,9 +15,10 @@
     />
     <script>
       (() => {
-        const saved = localStorage.getItem('aurelia-theme');
+        const saved = localStorage.getItem('jtwz.public.theme');
         const system = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
         document.documentElement.dataset.theme = saved || system;
+        document.documentElement.dataset.surface = 'public';
       })();
     </script>
     <title>JTWZ · 数字入口管理平台</title>

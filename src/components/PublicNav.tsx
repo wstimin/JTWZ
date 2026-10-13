@@ -5,7 +5,7 @@ import type { BrandSettings } from '../types'
 import { BrandMark } from './BrandMark'
 import { ThemeToggle } from './ThemeToggle'
 
-export function PublicNav({ settings }: { settings: BrandSettings }) {
+export function PublicNav({ settings, minimal = false }: { settings: BrandSettings; minimal?: boolean }) {
   const [open, setOpen] = useState(false)
 
   return (
@@ -16,7 +16,7 @@ export function PublicNav({ settings }: { settings: BrandSettings }) {
           <span>{settings.name}</span>
         </Link>
 
-        <div className={open ? 'public-links is-open' : 'public-links'}>
+        {!minimal ? <div className={open ? 'public-links is-open' : 'public-links'}>
           <NavLink to="/" end onClick={() => setOpen(false)}>首页</NavLink>
           <NavLink to="/downloads" onClick={() => setOpen(false)}>软件下载</NavLink>
           <a href="/#products" onClick={() => setOpen(false)}>产品</a>
@@ -27,12 +27,12 @@ export function PublicNav({ settings }: { settings: BrandSettings }) {
             <span>外观主题</span>
             <ThemeToggle />
           </div>
-        </div>
+        </div> : null}
 
         <div className="public-actions">
-          <Link className="button button--secondary button--small public-console-button" to="/downloads">获取软件</Link>
+          {!minimal ? <Link className="button button--secondary button--small public-console-button" to="/downloads">获取软件</Link> : null}
           <span className="desktop-theme-toggle"><ThemeToggle /></span>
-          <button
+          {!minimal ? <button
             className="nav-menu-button"
             type="button"
             onClick={() => setOpen((current) => !current)}
@@ -40,7 +40,7 @@ export function PublicNav({ settings }: { settings: BrandSettings }) {
             aria-label={open ? '关闭导航' : '打开导航'}
           >
             {open ? <X /> : <Menu />}
-          </button>
+          </button> : null}
         </div>
       </nav>
     </header>

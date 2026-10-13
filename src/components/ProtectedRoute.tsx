@@ -10,7 +10,7 @@ export function ProtectedRoute({ children }: { children: ReactNode }) {
   if (loading) {
     return <div className="app-loading"><BrandMark /><span>正在验证安全会话…</span></div>
   }
-  if (!admin) return <Navigate to="/admin/login" replace state={{ from: location.pathname }} />
+  if (!admin) return <Navigate to="/login" replace state={{ from: location.pathname }} />
   return children
 }
 

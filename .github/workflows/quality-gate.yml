@@ -1,0 +1,83 @@
+name: professional-quality-gate
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  application:
+    name: Node ${{ matrix.node }} application tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: npm run test:stage4
+      - run: npm run test:stage5
+      - run: npm run test:stage6
+      - name: Start service and run HTTP smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATA_DIR="$RUNNER_TEMP/jtwz-smoke" ADMIN_USERNAME=admin ADMIN_PASSWORD=local-development-password APP_SECRET=ci-quality-gate-secret node dist-server/index.js > "$RUNNER_TEMP/jtwz.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for attempt in {1..50}; do
+            curl -fsS http://127.0.0.1:8787/api/health >/dev/null && break
+            sleep 0.2
+          done
+          npm test
+
+  deployment-assets:
+    name: Deployment scripts and containers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          find deploy -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+          bash -n deploy/installer/jtwzctl
+          bash -n deploy/installer/jtwz-update
+      - name: Validate Compose manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          docker compose -f deploy/docker/docker-compose.yml config --quiet
+          mkdir -p deploy/1panel/app
+          cp .env.example deploy/1panel/app/.env
+          docker compose -f deploy/1panel/docker-compose.yml config --quiet
+      - name: Build hardened Docker image
+        run: docker build -f deploy/docker/Dockerfile -t jtwz:quality-gate .
+      - name: Run container health check
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name jtwz-quality -p 127.0.0.1:18787:8787 \
+            -e NODE_ENV=production -e API_HOST=0.0.0.0 -e API_PORT=8787 \
+            -e ADMIN_USERNAME=admin -e ADMIN_PASSWORD=quality-gate-password \
+            -e APP_SECRET=quality-gate-secret -e ALLOW_LOCAL_STORAGE_IN_PRODUCTION=true \
+            jtwz:quality-gate
+          trap 'docker rm -f jtwz-quality >/dev/null 2>&1 || true' EXIT
+          for attempt in {1..60}; do
+            curl -fsS http://127.0.0.1:18787/api/health >/dev/null && exit 0
+            sleep 1
+          done
+          docker logs jtwz-quality
+          exit 1

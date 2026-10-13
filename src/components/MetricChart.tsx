@@ -1,7 +1,6 @@
-import { chartData } from '../data'
 import { useId } from 'react'
 
-export function MetricChart({ data = chartData, secondary = [], labels }: { data?: number[]; secondary?: number[]; labels?: string[] }) {
+export function MetricChart({ data = [], secondary = [], labels }: { data?: number[]; secondary?: number[]; labels?: string[] }) {
   const gradientId = `chart-fill-${useId().replace(/:/g, '')}`
   const hasData = data.length > 1
   const safeData = data.length > 1 ? data : [0, 0]

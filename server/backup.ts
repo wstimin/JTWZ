@@ -1,19 +1,20 @@
 import { createHash } from 'node:crypto'
-import { closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync } from 'node:fs'
+import { closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { copyFile, rename } from 'node:fs/promises'
 import { basename, dirname, relative, resolve, sep } from 'node:path'
 import { Readable } from 'node:stream'
 import { finished } from 'node:stream/promises'
 import { createGunzip, createGzip } from 'node:zlib'
 import { db } from './db.js'
-import { config } from './config.js'
+import { config, normalizeAdminBasePath } from './config.js'
 import { createStorageDownload, createStorageUpload, isStorageConfigured, objectStorageMode } from './objectStorage.js'
 
 type Row = Record<string, unknown>
 type FileEntry = { archivePath: string; byteSize: number; sha256?: string; sourcePath?: string; objectKey?: string }
+type BackupConfiguration = { environment: Record<string, string>; adminBasePath: string; containsSecrets: boolean }
 type MigrationManifest = {
-  format: 'aurelia-portable-backup'
-  version: 2
+  format: 'jtwz-portable-backup' | 'aurelia-portable-backup'
+  version: 2 | 3
   exportedAt: string
   systemVersion: string
   databaseSchemaVersion: number
@@ -23,13 +24,63 @@ type MigrationManifest = {
   totalBytes: number
   tables: Record<string, unknown[]>
   files: { siteReleases: FileEntry[]; brandAssets: FileEntry[]; objects: FileEntry[] }
+  configuration?: BackupConfiguration
+  contentSha256?: string
 }
 
-const backupTables = ['settings', 'domains', 'redirect_rules', 'sites', 'site_versions', 'software', 'software_versions', 'packages', 'announcements', 'audit_logs'] as const
-const restoreDeleteOrder = ['redirect_rules', 'site_versions', 'packages', 'software_versions', 'domains', 'sites', 'software', 'announcements', 'audit_logs'] as const
-const restoreInsertOrder = ['settings', 'domains', 'redirect_rules', 'sites', 'site_versions', 'software', 'software_versions', 'packages', 'announcements', 'audit_logs'] as const
+const backupTables = ['admins', 'settings', 'domains', 'certificates', 'redirect_rules', 'sites', 'site_versions', 'software', 'software_versions', 'packages', 'announcements', 'analytics_events', 'audit_logs', 'admin_login_events', 'operation_tasks'] as const
+const restoreDeleteOrder = ['login_challenges', 'sessions', 'admin_login_events', 'analytics_events', 'redirect_rules', 'certificates', 'site_versions', 'packages', 'software_versions', 'domains', 'sites', 'software', 'announcements', 'audit_logs', 'operation_tasks', 'admins'] as const
+const restoreInsertOrder = ['settings', 'admins', 'domains', 'certificates', 'redirect_rules', 'sites', 'site_versions', 'software', 'software_versions', 'packages', 'announcements', 'analytics_events', 'audit_logs', 'admin_login_events', 'operation_tasks'] as const
+const migrationEnvironmentKeys = [
+  'NODE_ENV', 'COOKIE_SECURE', 'API_HOST', 'API_PORT', 'APP_HOST', 'PUBLIC_ADDRESS', 'ADMIN_ADDRESS', 'PUBLIC_DOMAIN', 'ADMIN_DOMAIN',
+  'ADMIN_BASE_PATH', 'ADMIN_DISABLED_PATHS', 'PUBLIC_URL', 'ADMIN_LOGIN_URL', 'APP_ORIGIN', 'PUBLIC_APP_ORIGIN', 'ADMIN_APP_ORIGIN', 'ADMIN_USERNAME',
+  'APP_SECRET', 'SESSION_DAYS', 'STORAGE_PROVIDER', 'ALLOW_LOCAL_STORAGE_IN_PRODUCTION', 'S3_ENDPOINT', 'S3_REGION', 'S3_BUCKET', 'S3_ACCESS_KEY',
+  'S3_SECRET_KEY', 'S3_PUBLIC_BASE_URL', 'STORAGE_URL_TTL', 'MAX_PACKAGE_BYTES', 'MAX_SITE_ZIP_BYTES', 'MAX_BACKUP_BYTES', 'MAX_UPDATE_BYTES',
+  'BACKUP_INTERVAL_HOURS', 'BACKUP_RETENTION_DAYS', 'BACKUP_REMOTE', 'ALERT_WEBHOOK_URL', 'ALERT_WEBHOOK_SECRET', 'CERTIFICATE_CALLBACK_SECRET',
+  'DNS_PROVIDER', 'CERTIFICATE_PROVIDER', 'CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_API_BASE', 'DNS_WEBHOOK_URL', 'DNS_WEBHOOK_SECRET',
+  'UPDATE_MANIFEST_URL', 'UPDATE_PUBLIC_KEY', 'UPDATE_APPLY_COMMAND', 'UPDATE_APPLY_ARGS_JSON', 'SUPPORT_EMAIL',
+] as const
 
 mkdirSync(config.backupDir, { recursive: true })
+
+function parseEnvironmentFile() {
+  const values: Record<string, string> = {}
+  if (!existsSync(config.envPath)) return values
+  for (const rawLine of readFileSync(config.envPath, 'utf8').split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const separator = line.indexOf('=')
+    if (separator < 1) continue
+    values[line.slice(0, separator).trim()] = line.slice(separator + 1).trim()
+  }
+  return values
+}
+
+function captureConfiguration(): BackupConfiguration {
+  const fileValues = parseEnvironmentFile()
+  const environment: Record<string, string> = {}
+  for (const key of migrationEnvironmentKeys) {
+    const value = process.env[key] ?? fileValues[key]
+    if (value !== undefined) environment[key] = String(value)
+  }
+  const admin = db.prepare('SELECT username FROM admins ORDER BY created_at ASC LIMIT 1').get() as Row | undefined
+  if (admin?.username) environment.ADMIN_USERNAME = String(admin.username)
+  environment.ADMIN_BASE_PATH = String(environment.ADMIN_BASE_PATH || config.adminBasePath)
+  return { environment, adminBasePath: environment.ADMIN_BASE_PATH, containsSecrets: true }
+}
+
+function integrityPayload(manifest: MigrationManifest) {
+  return {
+    format: manifest.format, version: manifest.version, exportedAt: manifest.exportedAt, systemVersion: manifest.systemVersion,
+    databaseSchemaVersion: manifest.databaseSchemaVersion, minimumSystemVersion: manifest.minimumSystemVersion,
+    storageProvider: manifest.storageProvider, totalFiles: manifest.totalFiles, totalBytes: manifest.totalBytes,
+    tables: manifest.tables, files: manifest.files, configuration: manifest.configuration,
+  }
+}
+
+function manifestIntegrity(manifest: MigrationManifest) {
+  return createHash('sha256').update(JSON.stringify(integrityPayload(manifest))).digest('hex')
+}
 
 function sha256FileSync(filePath: string) {
   const descriptor = openSync(filePath, 'r')
@@ -93,8 +144,8 @@ function tarHeader(archivePath: string, size: number) {
   header[156] = '0'.charCodeAt(0)
   writeText(header, 257, 6, 'ustar')
   writeText(header, 263, 2, '00')
-  writeText(header, 265, 32, 'aurelia')
-  writeText(header, 297, 32, 'aurelia')
+  writeText(header, 265, 32, 'jtwz')
+  writeText(header, 297, 32, 'jtwz')
   writeText(header, 345, 155, parts.prefix)
   const checksum = header.reduce((sum, byte) => sum + byte, 0).toString(8).padStart(6, '0').slice(-6)
   header.write(`${checksum}\0 `, 148, 8, 'ascii')
@@ -142,12 +193,15 @@ function buildManifest(): MigrationManifest {
       entry.sourcePath = resolve(config.storageDir, entry.objectKey || '')
       if (!entry.sourcePath.startsWith(`${config.storageDir}${sep}`) || !existsSync(entry.sourcePath)) throw new Error(`安装包文件缺失，无法生成完整备份：${entry.objectKey}`)
       entry.byteSize = statSync(entry.sourcePath).size
+      entry.sha256 = sha256FileSync(entry.sourcePath)
     }
+  } else if (uniqueObjects.some((entry) => !/^[a-f0-9]{64}$/i.test(entry.sha256 || ''))) {
+    throw new Error('对象存储中存在缺少 SHA-256 的安装包，无法生成可校验的完整备份')
   }
   const allFiles = [...siteReleases, ...brandAssets, ...uniqueObjects]
-  return {
-    format: 'aurelia-portable-backup',
-    version: 2,
+  const manifest: MigrationManifest = {
+    format: 'jtwz-portable-backup',
+    version: 3,
     exportedAt: new Date().toISOString(),
     systemVersion: config.systemVersion,
     databaseSchemaVersion: 2,
@@ -157,13 +211,16 @@ function buildManifest(): MigrationManifest {
     totalBytes: allFiles.reduce((sum, item) => sum + item.byteSize, 0),
     tables: Object.fromEntries(backupTables.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()])),
     files: { siteReleases, brandAssets, objects: uniqueObjects },
+    configuration: captureConfiguration(),
   }
+  manifest.contentSha256 = manifestIntegrity(manifest)
+  return manifest
 }
 
 export async function createBackup() {
   const manifest = buildManifest()
   const stamp = manifest.exportedAt.replace(/[:.]/g, '-').replace('Z', 'Z')
-  const fileName = `platform-${stamp}.aurelia-backup`
+  const fileName = `jtwz-${stamp}.jtwz-backup`
   const destination = resolve(config.backupDir, fileName)
   const temporary = `${destination}.tmp`
   const gzip = createGzip({ level: 6 })
@@ -197,7 +254,7 @@ export async function createBackup() {
     remote = true
   }
   pruneBackups()
-  return { fileName, createdAt: manifest.exportedAt, byteSize: statSync(destination).size, remote, formatVersion: manifest.version }
+  return { fileName, createdAt: manifest.exportedAt, byteSize: statSync(destination).size, sha256: sha256FileSync(destination), remote, formatVersion: manifest.version, containsSecrets: true }
 }
 
 class StreamReader {
@@ -293,7 +350,8 @@ async function extractArchive(filePath: string, staging: string) {
   }
   if (!manifestBytes) throw new Error('迁移备份缺少 manifest.json')
   const manifest = JSON.parse(manifestBytes.toString('utf8')) as MigrationManifest
-  if (manifest.format !== 'aurelia-portable-backup' || manifest.version !== 2 || !manifest.tables || !manifest.files) throw new Error('不支持的迁移备份格式')
+  if (!['jtwz-portable-backup', 'aurelia-portable-backup'].includes(manifest.format) || ![2, 3].includes(manifest.version) || !manifest.tables || !manifest.files) throw new Error('不支持的迁移备份格式')
+  if (manifest.version >= 3 && (!/^[a-f0-9]{64}$/i.test(manifest.contentSha256 || '') || manifestIntegrity(manifest) !== manifest.contentSha256)) throw new Error('迁移备份清单完整性校验失败')
   return manifest
 }
 
@@ -345,7 +403,11 @@ async function installFiles(manifest: MigrationManifest, staging: string) {
 function restoreDatabase(manifest: MigrationManifest) {
   db.exec('BEGIN IMMEDIATE')
   try {
-    for (const table of restoreDeleteOrder) db.prepare(`DELETE FROM ${table}`).run()
+    const restoresAdmins = Array.isArray(manifest.tables.admins) && manifest.tables.admins.length > 0
+    for (const table of restoreDeleteOrder) {
+      if ((table === 'sessions' || table === 'admins') && !restoresAdmins) continue
+      db.prepare(`DELETE FROM ${table}`).run()
+    }
     db.prepare('DELETE FROM settings').run()
     for (const table of restoreInsertOrder) {
       const availableColumns = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Row[]).map((column) => String(column.name)))
@@ -369,6 +431,31 @@ function restoreDatabase(manifest: MigrationManifest) {
   }
 }
 
+async function restoreConfiguration(manifest: MigrationManifest) {
+  if (manifest.version < 3 || !manifest.configuration?.environment) return null
+  const allowed = new Set<string>(migrationEnvironmentKeys)
+  const restored = Object.fromEntries(Object.entries(manifest.configuration.environment)
+    .filter(([key]) => allowed.has(key))
+    .map(([key, value]) => [key, String(value).replace(/\r?\n/g, '\\n')]))
+  restored.ADMIN_BASE_PATH = normalizeAdminBasePath(String(restored.ADMIN_BASE_PATH || manifest.configuration.adminBasePath || '/admin'))
+  const currentLines = existsSync(config.envPath) ? readFileSync(config.envPath, 'utf8').split(/\r?\n/) : []
+  const written = new Set<string>()
+  const nextLines = currentLines.filter((line, index) => line || index < currentLines.length - 1).map((line) => {
+    const separator = line.indexOf('=')
+    if (separator < 1) return line
+    const key = line.slice(0, separator).trim()
+    if (!(key in restored)) return line
+    written.add(key)
+    return `${key}=${restored[key]}`
+  })
+  for (const [key, value] of Object.entries(restored)) if (!written.has(key)) nextLines.push(`${key}=${value}`)
+  const temporary = `${config.envPath}.restore-${Date.now()}.tmp`
+  mkdirSync(dirname(config.envPath), { recursive: true })
+  writeFileSync(temporary, `${nextLines.join('\n').replace(/\n+$/, '')}\n`, { encoding: 'utf8', mode: 0o600 })
+  await rename(temporary, config.envPath)
+  return restored.ADMIN_BASE_PATH
+}
+
 export async function restoreBackup(filePath: string) {
   const staging = resolve(config.tempDir, `restore-${Date.now()}`)
   if (!staging.startsWith(`${config.tempDir}${sep}`)) throw new Error('恢复临时目录无效')
@@ -377,15 +464,35 @@ export async function restoreBackup(filePath: string) {
     const manifest = await extractArchive(filePath, staging)
     await installFiles(manifest, staging)
     restoreDatabase(manifest)
-    return { importedAt: new Date().toISOString(), sourceExportedAt: manifest.exportedAt, files: manifest.files.siteReleases.length + (manifest.files.brandAssets?.length || 0) + manifest.files.objects.length }
+    const adminBasePath = await restoreConfiguration(manifest)
+    return {
+      importedAt: new Date().toISOString(), sourceExportedAt: manifest.exportedAt,
+      files: manifest.files.siteReleases.length + (manifest.files.brandAssets?.length || 0) + manifest.files.objects.length,
+      formatVersion: manifest.version, adminBasePath, restartRequired: Boolean(adminBasePath),
+    }
   } finally {
     rmSync(staging, { recursive: true, force: true })
   }
 }
 
+export async function restoreBackupWithRollback(filePath: string) {
+  const rollbackBackup = await createBackup()
+  try {
+    const restored = await restoreBackup(filePath)
+    return { restored, rollbackBackup, rolledBack: false }
+  } catch (error) {
+    try {
+      await restoreBackup(backupFilePath(rollbackBackup.fileName))
+    } catch (rollbackError) {
+      throw new Error(`迁移恢复失败，自动回滚也失败：${error instanceof Error ? error.message : String(error)}；回滚错误：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`)
+    }
+    throw new Error(`迁移恢复失败，已自动恢复原网站：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 export function listBackups() {
   return readdirSync(config.backupDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.startsWith('platform-') && entry.name.endsWith('.aurelia-backup'))
+    .filter((entry) => entry.isFile() && (/^jtwz-[\w.-]+\.jtwz-backup$/.test(entry.name) || /^platform-[\w.-]+\.aurelia-backup$/.test(entry.name)))
     .map((entry) => {
       const fileName = basename(entry.name)
       const filePath = resolve(config.backupDir, fileName)
@@ -396,7 +503,7 @@ export function listBackups() {
 
 export function backupFilePath(fileName: string) {
   const safeName = basename(fileName)
-  if (safeName !== fileName || !/^platform-[\w.-]+\.aurelia-backup$/.test(safeName)) throw new Error('备份文件名无效')
+  if (safeName !== fileName || (!/^jtwz-[\w.-]+\.jtwz-backup$/.test(safeName) && !/^platform-[\w.-]+\.aurelia-backup$/.test(safeName))) throw new Error('备份文件名无效')
   const filePath = resolve(config.backupDir, safeName)
   if (!filePath.startsWith(`${config.backupDir}${sep}`) || !existsSync(filePath)) throw new Error('备份文件不存在')
   return filePath

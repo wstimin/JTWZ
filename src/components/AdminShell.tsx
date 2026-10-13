@@ -1,5 +1,6 @@
 import {
   Activity,
+  AlertTriangle,
   ClipboardList,
   Box,
   ChevronLeft,
@@ -7,11 +8,14 @@ import {
   Gauge,
   Globe2,
   Layers3,
+  ListChecks,
   LogOut,
   Menu,
   PackageOpen,
+  RefreshCw,
   Search,
   Settings,
+  ShieldCheck,
   Sparkles,
   Waypoints,
   X,
@@ -28,44 +32,46 @@ const groups = [
   {
     label: '管理',
     links: [
-      { to: '/admin', label: '仪表盘', icon: Gauge, end: true },
-      { to: '/admin/domains', label: '域名管理', icon: Globe2 },
-      { to: '/admin/redirects', label: '跳转规则', icon: Waypoints },
+      { to: '/', label: '仪表盘', icon: Gauge, end: true },
+      { to: '/domains', label: '域名管理', icon: Globe2, permission: 'content.read' },
+      { to: '/redirects', label: '跳转规则', icon: Waypoints, permission: 'content.read' },
     ],
   },
   {
     label: '内容',
     links: [
-      { to: '/admin/sites', label: '静态网站', icon: Layers3 },
-      { to: '/admin/software', label: '软件管理', icon: Box },
-      { to: '/admin/versions', label: '版本管理', icon: PackageOpen },
-      { to: '/admin/packages', label: '安装包', icon: PackageOpen },
-      { to: '/admin/announcements', label: '公告管理', icon: Sparkles },
-      { to: '/admin/analytics', label: '数据统计', icon: Activity },
-      { to: '/admin/audit-logs', label: '操作日志', icon: ClipboardList },
+      { to: '/sites', label: '静态网站', icon: Layers3, permission: 'content.read' },
+      { to: '/software', label: '软件管理', icon: Box, permission: 'content.read' },
+      { to: '/versions', label: '版本管理', icon: PackageOpen, permission: 'content.read' },
+      { to: '/packages', label: '安装包', icon: PackageOpen, permission: 'content.read' },
+      { to: '/announcements', label: '公告管理', icon: Sparkles, permission: 'content.read' },
+      { to: '/analytics', label: '数据统计', icon: Activity, permission: 'analytics.read' },
+      { to: '/audit-logs', label: '操作日志', icon: ClipboardList, permission: 'audit.read' },
     ],
   },
   {
     label: '系统',
-    links: [{ to: '/admin/settings', label: '系统设置', icon: Settings }],
+    links: [{ to: '/tasks', label: '任务中心', icon: ListChecks, permission: 'tasks.manage' }, { to: '/security', label: '安全中心', icon: ShieldCheck, permission: 'content.read' }, { to: '/settings', label: '系统设置', icon: Settings, permission: 'system.manage' }],
   },
 ]
 
 const pageMeta: Record<string, { title: string; description: string }> = {
-  '/admin': { title: '仪表盘', description: '统一查看域名、网站与软件下载状态。' },
-  '/admin/domains': { title: '域名管理', description: '接入、验证并管理每一个数字入口。' },
-  '/admin/redirects': { title: '跳转规则', description: '灵活编排域名和路径的去向。' },
-  '/admin/sites': { title: '静态网站', description: '上传、发布并绑定你的静态页面。' },
-  '/admin/software': { title: '软件管理', description: '管理软件资料、版本与发布状态。' },
-  '/admin/versions': { title: '版本管理', description: '维护版本说明、平台信息和下载状态。' },
-  '/admin/packages': { title: '安装包', description: '管理对象存储中的安装包文件。' },
-  '/admin/announcements': { title: '公告管理', description: '发布软件下载中心和公开页面的最新通知。' },
-  '/admin/analytics': { title: '数据统计', description: '从访问入口到内容交付的完整洞察。' },
-  '/admin/audit-logs': { title: '操作日志', description: '追踪管理员登录、配置变更与发布操作。' },
-  '/admin/settings': { title: '系统设置', description: '调整品牌、通知与平台参数。' },
+  '/': { title: '仪表盘', description: '统一查看域名、网站与软件下载状态。' },
+  '/domains': { title: '域名管理', description: '接入、验证并管理每一个数字入口。' },
+  '/redirects': { title: '跳转规则', description: '灵活编排域名和路径的去向。' },
+  '/sites': { title: '静态网站', description: '上传、发布并绑定你的静态页面。' },
+  '/software': { title: '软件管理', description: '管理软件资料、版本与发布状态。' },
+  '/versions': { title: '版本管理', description: '维护版本说明、平台信息和下载状态。' },
+  '/packages': { title: '安装包', description: '管理对象存储中的安装包文件。' },
+  '/announcements': { title: '公告管理', description: '发布软件下载中心和公开页面的最新通知。' },
+  '/analytics': { title: '数据统计', description: '从访问入口到内容交付的完整洞察。' },
+  '/audit-logs': { title: '操作日志', description: '追踪管理员登录、配置变更与发布操作。' },
+  '/tasks': { title: '任务中心', description: '查看长任务进度、结果、日志与失败恢复。' },
+  '/security': { title: '安全中心', description: '管理角色权限、双重验证、登录设备与安全事件。' },
+  '/settings': { title: '系统设置', description: '调整品牌、通知与平台参数。' },
 }
 
-export function AdminShell({ settings }: { settings: BrandSettings }) {
+export function AdminShell({ settings, bootstrapStatus, bootstrapError, onRetry }: { settings: BrandSettings; bootstrapStatus: 'idle' | 'loading' | 'ready' | 'error'; bootstrapError: string; onRetry: () => void }) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
   const [search, setSearch] = useState('')
@@ -74,8 +80,9 @@ export function AdminShell({ settings }: { settings: BrandSettings }) {
   const location = useLocation()
   const navigate = useNavigate()
   const { admin, logout } = useAuth()
-  const meta = pageMeta[location.pathname] ?? pageMeta['/admin']
-  const searchableLinks = useMemo(() => groups.flatMap((group) => group.links), [])
+  const meta = pageMeta[location.pathname] ?? pageMeta['/']
+  const visibleGroups = useMemo(() => groups.map((group) => ({ ...group, links: group.links.filter((item) => !('permission' in item) || admin?.permissions.includes(item.permission as never)) })), [admin])
+  const searchableLinks = useMemo(() => visibleGroups.flatMap((group) => group.links), [visibleGroups])
   const searchResults = searchableLinks.filter((item) => item.label.toLowerCase().includes(search.trim().toLowerCase())).slice(0, 6)
 
   useEffect(() => {
@@ -101,7 +108,7 @@ export function AdminShell({ settings }: { settings: BrandSettings }) {
       {mobileOpen ? <button className="admin-scrim" aria-label="关闭菜单" onClick={() => setMobileOpen(false)} /> : null}
       <aside className={mobileOpen ? 'admin-sidebar is-mobile-open' : 'admin-sidebar'}>
         <div className="admin-brand-row">
-          <Link className="admin-brand" to="/admin" onClick={() => setMobileOpen(false)}>
+          <Link className="admin-brand" to="/" onClick={() => setMobileOpen(false)}>
             <BrandMark compact logoUrl={settings.logoUrl} />
             <span>{settings.name}</span>
           </Link>
@@ -111,7 +118,7 @@ export function AdminShell({ settings }: { settings: BrandSettings }) {
         </div>
 
         <div className="admin-nav-scroll">
-          {groups.map((group) => (
+          {visibleGroups.map((group) => (
             <div className="admin-nav-group" key={group.label}>
               <span className="admin-nav-label">{group.label}</span>
               {group.links.map((item) => {
@@ -120,7 +127,7 @@ export function AdminShell({ settings }: { settings: BrandSettings }) {
                   <NavLink
                     className={({ isActive }) => (isActive ? 'admin-nav-link is-active' : 'admin-nav-link')}
                     to={item.to}
-                    end={item.end}
+                    end={'end' in item ? item.end : undefined}
                     key={item.to}
                     onClick={() => setMobileOpen(false)}
                     title={collapsed ? item.label : undefined}
@@ -143,7 +150,7 @@ export function AdminShell({ settings }: { settings: BrandSettings }) {
             <LogOut />
             <span>返回网站</span>
           </a>
-          <button className="admin-nav-link" type="button" onClick={() => { void logout().then(() => navigate('/admin/login', { replace: true })) }}>
+          <button className="admin-nav-link" type="button" onClick={() => { void logout().then(() => navigate('/login', { replace: true })) }}>
             <LogOut />
             <span>退出登录</span>
           </button>
@@ -171,11 +178,11 @@ export function AdminShell({ settings }: { settings: BrandSettings }) {
 
           <div className="admin-top-actions">
             <ThemeToggle />
-            <Link className="admin-profile" to="/admin/settings?section=admin" title="管理员账号设置">
+            <Link className="admin-profile" to="/security" title="管理员账号与安全">
               <span className="admin-avatar">A</span>
               <span className="admin-profile-copy">
-                <strong>{admin?.username || '管理员'}</strong>
-                <small>超级管理员</small>
+                <strong>{admin?.displayName || admin?.username || '管理员'}</strong>
+                <small>{admin ? ({ owner: '系统所有者', admin: '系统管理员', editor: '内容编辑', analyst: '只读审计' } as const)[admin.role] : '管理员'}</small>
               </span>
             </Link>
           </div>
@@ -187,12 +194,14 @@ export function AdminShell({ settings }: { settings: BrandSettings }) {
               <span className="overline"><Sparkles /> Workspace</span>
               <p>{meta.description}</p>
             </div>
-            {location.pathname === '/admin' ? (
-              <Link className="button button--primary" to="/admin/domains">
+            {location.pathname === '/' && admin?.permissions.includes('content.manage') ? (
+              <Link className="button button--primary" to="/domains">
                 <Globe2 /> 添加域名
               </Link>
             ) : null}
           </div>
+          {bootstrapStatus === 'loading' ? <section className="admin-data-banner" role="status"><RefreshCw className="is-spinning" /><span>正在同步管理数据…</span></section> : null}
+          {bootstrapStatus === 'error' ? <section className="admin-data-banner is-error" role="alert"><AlertTriangle /><span><strong>管理数据未能加载</strong>{bootstrapError}</span><button type="button" onClick={onRetry}>重新加载</button></section> : null}
           <Outlet />
         </main>
       </div>

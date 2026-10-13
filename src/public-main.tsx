@@ -4,12 +4,14 @@ import { BrowserRouter } from 'react-router-dom'
 import PublicApp from './PublicApp'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { ToastProvider } from './contexts/ToastContext'
-import './styles.css'
+import './styles/public.css'
+
+localStorage.removeItem('aurelia-theme')
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
-      <ThemeProvider>
+      <ThemeProvider surface="public">
         <ToastProvider>
           <PublicApp />
         </ToastProvider>

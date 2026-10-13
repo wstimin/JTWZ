@@ -21,6 +21,46 @@ export interface DomainRecord {
   updatedAt: string
 }
 
+export interface CertificateRecord {
+  id: string
+  domainId: string
+  hostname: string
+  provider: string
+  issuer: string
+  serialNumber: string
+  externalRef: string
+  issuedAt?: string
+  expiresAt?: string
+  expiresInDays?: number
+  status: 'pending' | 'active' | 'expiring' | 'expired' | 'error' | 'revoked'
+  autoRenew: boolean
+  note: string
+  lastError: string
+  updatedAt: string
+  createdAt: string
+}
+
+export interface OperationTaskRecord {
+  id: string
+  kind: string
+  label: string
+  entityType: string
+  entityId: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+  progress: number
+  message: string
+  input: Record<string, unknown>
+  result: Record<string, unknown>
+  error: string
+  logs: Array<{ at: string; level: 'info' | 'success' | 'error'; message: string }>
+  retryable: boolean
+  retryOf: string
+  createdAt: string
+  startedAt?: string
+  finishedAt?: string
+  updatedAt: string
+}
+
 export interface RedirectRuleRecord {
   id: string
   domainId: string
@@ -124,11 +164,17 @@ export interface BrandSettings {
   defaultRedirectCode?: 301 | 302
   autoHttps?: boolean
   trafficAlerts?: boolean
+  publicMaintenance?: boolean
+  maintenanceMessage?: string
 }
 
 export interface AdminUser {
   id: string
   username: string
+  displayName: string
+  role: 'owner' | 'admin' | 'editor' | 'analyst'
+  permissions: Array<'system.manage' | 'admins.manage' | 'content.manage' | 'content.read' | 'analytics.read' | 'audit.read' | 'tasks.manage'>
+  twoFactorEnabled: boolean
 }
 
 export interface SiteVersionRecord {
@@ -145,6 +191,9 @@ export interface AuditLogRecord {
   entityType: string
   entityId: string
   detail: string
+  adminName?: string
+  requestId?: string
+  ipAddress?: string
   createdAt: string
 }
 
@@ -196,10 +245,13 @@ export interface SystemHealth {
 
 export interface SystemUpdateStatus {
   configured: boolean
+  configurationError?: string
   currentVersion: string
   latestVersion?: string
   updateAvailable: boolean
   applyConfigured: boolean
+  signatureConfigured?: boolean
+  signatureVerified?: boolean
   checkedAt?: string
   manifest?: {
     version: string

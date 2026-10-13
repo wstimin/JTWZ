@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Eye, EyeOff, LockKeyhole, ShieldCheck } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Eye, EyeOff, KeyRound, LockKeyhole, ShieldCheck } from 'lucide-react'
 import { FormEvent, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import type { BrandSettings } from '../types'
@@ -14,9 +14,11 @@ export function LoginPage({ settings }: { settings: BrandSettings }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
+  const [challengeId, setChallengeId] = useState('')
+  const [code, setCode] = useState('')
   const navigate = useNavigate()
   const location = useLocation()
-  const { login } = useAuth()
+  const { login, verifyTwoFactor, sessionExpired } = useAuth()
   const { notify } = useToast()
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -24,9 +26,18 @@ export function LoginPage({ settings }: { settings: BrandSettings }) {
     setLoading(true)
     setError('')
     try {
-      await login(username, password)
+      if (challengeId) {
+        await verifyTwoFactor(challengeId, code)
+      } else {
+        const result = await login(username, password)
+        if (result.requiresTwoFactor && result.challengeId) {
+          setChallengeId(result.challengeId)
+          setPassword('')
+          return
+        }
+      }
       notify('身份验证成功，欢迎回来')
-      const destination = (location.state as { from?: string } | null)?.from || '/admin'
+      const destination = (location.state as { from?: string } | null)?.from || '/'
       navigate(destination, { replace: true })
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '登录失败，请稍后重试')
@@ -66,10 +77,10 @@ export function LoginPage({ settings }: { settings: BrandSettings }) {
           <div className="login-card-head">
             <span className="overline">Welcome back</span>
             <h2>登录管理后台</h2>
-            <p>请输入管理员账号完成身份验证。</p>
+            <p>{challengeId ? '请输入身份验证器中的 6 位动态验证码，或使用一次性恢复码。' : '请输入管理员账号完成身份验证。'}</p>
           </div>
           <form onSubmit={submit}>
-            <label className="field">
+            {!challengeId ? <><label className="field">
               <span>管理员账号</span>
               <input type="text" placeholder="请输入管理员账号" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required />
             </label>
@@ -82,15 +93,16 @@ export function LoginPage({ settings }: { settings: BrandSettings }) {
                   {showPassword ? <EyeOff /> : <Eye />}
                 </button>
               </span>
-            </label>
-            {error ? <p className="form-error" role="alert">{error}</p> : null}
+            </label></> : <label className="field"><span>动态验证码或恢复码</span><span className="password-input"><KeyRound /><input type="text" inputMode="numeric" autoComplete="one-time-code" placeholder="000000" value={code} onChange={(event) => setCode(event.target.value.trim())} required autoFocus /></span></label>}
+            {error || sessionExpired ? <p className="form-error" role="alert">{error || '登录状态已失效，请重新登录。'}</p> : null}
             <div className="login-options">
-              <span>会话由安全 Cookie 管理</span>
+              <span>{challengeId ? '验证码每 30 秒更新一次' : '会话由安全 Cookie 与 CSRF 令牌保护'}</span>
               {settings.supportEmail ? <a href={`mailto:${settings.supportEmail}?subject=${encodeURIComponent(`${settings.name} 管理员密码重置`)}`}>联系支持重置密码</a> : <span>密码重置请联系系统负责人</span>}
             </div>
             <button className="button button--primary login-submit" type="submit" disabled={loading}>
-              {loading ? '正在进入…' : '进入控制台'} <ArrowRight />
+              {loading ? '正在验证…' : challengeId ? '验证并进入' : '进入控制台'} <ArrowRight />
             </button>
+            {challengeId ? <button className="button button--secondary login-submit" type="button" disabled={loading} onClick={() => { setChallengeId(''); setCode(''); setError('') }}>返回账号登录</button> : null}
           </form>
           <a className="back-link" href={publicSiteUrl('/')}><ArrowLeft /> 返回网站首页</a>
         </section>

@@ -61,7 +61,7 @@ export function DashboardPage({ domains, sites, software, analytics, setAnalytic
 
   return (
     <div className="dashboard-stack">
-      {alerts.length ? <section className="dashboard-alert-banner panel" role="status"><Clock3 /><strong>{alerts.length} 项异常需要处理</strong><span title={alerts.map((alert) => `${alert.title}：${alert.detail}`).join('\n')}>{alertSummary}{alerts.length > 2 ? ` · 另有 ${alerts.length - 2} 项` : ''}</span><Link className="text-link" to="/admin/audit-logs">查看详情 <ArrowUpRight /></Link></section> : null}
+      {alerts.length ? <section className="dashboard-alert-banner panel" role="status"><Clock3 /><strong>{alerts.length} 项异常需要处理</strong><span title={alerts.map((alert) => `${alert.title}：${alert.detail}`).join('\n')}>{alertSummary}{alerts.length > 2 ? ` · 另有 ${alerts.length - 2} 项` : ''}</span><Link className="text-link" to="/audit-logs">查看详情 <ArrowUpRight /></Link></section> : null}
       <section className="metric-grid">
         {metrics.map((metric) => {
           const Icon = metric.icon
@@ -99,7 +99,7 @@ export function DashboardPage({ domains, sites, software, analytics, setAnalytic
       <section className="panel table-panel">
         <div className="panel-heading">
           <div><span className="overline">Domains</span><h2>域名状态</h2></div>
-          <Link className="text-link" to="/admin/domains">查看全部 <ArrowUpRight /></Link>
+          <Link className="text-link" to="/domains">查看全部 <ArrowUpRight /></Link>
         </div>
         <div className="data-table-wrap">
           <table className="data-table">
@@ -113,7 +113,7 @@ export function DashboardPage({ domains, sites, software, analytics, setAnalytic
                   <td><DomainStatusBadge status={domain.status} /></td>
                   <td><strong>{domain.visits.toLocaleString()}</strong></td>
                   <td><span className="table-muted">{domain.updatedAt}</span></td>
-                  <td><Link className="table-action" to="/admin/domains" aria-label={`管理 ${domain.hostname}`}><ExternalLink /></Link></td>
+                  <td><Link className="table-action" to="/domains" aria-label={`管理 ${domain.hostname}`}><ExternalLink /></Link></td>
                 </tr>
               ))}
             </tbody>

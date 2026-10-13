@@ -1,0 +1,47 @@
+@import '../styles.css';
+
+:root[data-surface='public'] {
+  --surface-density: 1;
+}
+
+.public-notice {
+  position: relative;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  width: min(1180px, calc(100% - 40px));
+  margin: 14px auto 0;
+  padding: 10px 14px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, #d69a32 48%, var(--border));
+  border-radius: 12px;
+  color: var(--text-primary);
+  background: color-mix(in srgb, #d69a32 10%, var(--bg-primary));
+  font-size: 0.78rem;
+}
+
+.public-notice svg { width: 17px; color: #b87812; }
+.public-notice button { border: 0; color: var(--accent-hover); background: transparent; font: inherit; font-weight: 700; cursor: pointer; }
+
+.public-state-page { min-height: 100vh; min-height: 100svh; }
+.public-state-main { display: grid; min-height: calc(100vh - 96px); min-height: calc(100svh - 96px); place-items: center; padding-block: 80px; }
+.public-state-card { width: min(620px, 100%); padding: clamp(32px, 6vw, 64px); text-align: center; }
+.public-state-card h1 { margin: 8px 0 14px; font-family: var(--font-display); font-size: clamp(2rem, 7vw, 4rem); }
+.public-state-card > p:not(.eyebrow) { max-width: 480px; margin: 0 auto 24px; color: var(--text-secondary); line-height: 1.8; }
+.public-state-card .button, .public-state-card .text-link { margin: 10px auto 0; }
+.public-state-icon { display: inline-grid; width: 56px; height: 56px; margin-bottom: 16px; place-items: center; border-radius: 18px; color: var(--accent-hover); background: var(--accent-soft); }
+.public-state-icon svg { width: 25px; }
+.public-state-icon.is-loading svg { animation: public-state-pulse 1.2s ease-in-out infinite; }
+
+@keyframes public-state-pulse { 50% { opacity: 0.35; transform: scale(0.88); } }
+
+@media (max-width: 680px) {
+  .public-notice { width: calc(100% - 24px); grid-template-columns: auto minmax(0, 1fr); }
+  .public-notice button { grid-column: 2; justify-self: start; }
+  .public-state-main { min-height: calc(100vh - 72px); min-height: calc(100svh - 72px); padding-block: 40px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .public-state-icon.is-loading svg { animation: none; }
+}

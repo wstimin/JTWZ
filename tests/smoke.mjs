@@ -1,21 +1,41 @@
 import assert from 'node:assert/strict'
 
 const base = process.env.TEST_BASE_URL || 'http://127.0.0.1:8787'
+const adminBasePath = `/${String(process.env.TEST_ADMIN_BASE_PATH || '/admin').replace(/^\/+|\/+$/g, '')}`
 const health = await fetch(`${base}/api/health`)
 assert.equal(health.status, 200)
 const payload = await health.json()
 assert.equal(payload.ok, true)
+assert.equal(payload.service, 'jtwz-api')
 console.log('smoke: health endpoint passed')
 
 const publicFrontend = await fetch(`${base}/`)
 assert.equal(publicFrontend.status, 200)
-assert.match(await publicFrontend.text(), /数字入口管理平台/)
-const adminFrontend = await fetch(`${base}/admin/versions`)
+const publicHtml = await publicFrontend.text()
+assert.match(publicHtml, /数字入口管理平台/)
+assert.match(publicHtml, /jtwz\.public\.theme/)
+assert.doesNotMatch(publicHtml, /jtwz\.admin\.theme/)
+const adminFrontend = await fetch(`${base}${adminBasePath}/versions`)
 assert.equal(adminFrontend.status, 200)
-assert.match(await adminFrontend.text(), /管理控制台/)
+const adminHtml = await adminFrontend.text()
+assert.match(adminHtml, /管理控制台/)
+assert.match(adminHtml, /jtwz\.admin\.theme/)
+assert.doesNotMatch(adminHtml, /jtwz\.public\.theme/)
+assert.ok(adminHtml.includes(`name="jtwz-admin-base-path" content="${adminBasePath}"`))
+assert.match(adminHtml, /\/admin-assets\/assets\//)
+const adminAssetPath = adminHtml.match(/(?:src|href)="(\/admin-assets\/assets\/[^"]+)"/)?.[1]
+assert.ok(adminAssetPath)
+const adminAsset = await fetch(`${base}${adminAssetPath}`)
+assert.equal(adminAsset.status, 200)
+const missingAdminAsset = await fetch(`${base}/admin-assets/assets/not-found.js`)
+assert.equal(missingAdminAsset.status, 404)
 const legacyLogin = await fetch(`${base}/login`, { redirect: 'manual' })
 assert.equal(legacyLogin.status, 308)
-assert.equal(legacyLogin.headers.get('location'), '/admin/login')
+assert.equal(legacyLogin.headers.get('location'), `${adminBasePath}/login`)
+if (adminBasePath !== '/admin') {
+  const disabledDefaultAdmin = await fetch(`${base}/admin`, { redirect: 'manual' })
+  assert.equal(disabledDefaultAdmin.status, 404)
+}
 console.log('smoke: separated public and admin frontends passed')
 
 const preflight = await fetch(`${base}/api/auth/login`, {
@@ -31,6 +51,13 @@ const rejectedOrigin = await fetch(`${base}/api/auth/login`, {
 })
 assert.equal(rejectedOrigin.status, 403)
 console.log('smoke: API origin policy passed')
+
+const publicSettings = await fetch(`${base}/api/public/settings`)
+assert.equal(publicSettings.status, 200)
+const publicSettingsPayload = await publicSettings.json()
+assert.equal(typeof publicSettingsPayload.settings.publicMaintenance, 'boolean')
+assert.equal(typeof publicSettingsPayload.settings.maintenanceMessage, 'string')
+console.log('smoke: public state configuration passed')
 
 const publicSoftware = await fetch(`${base}/api/public/software`)
 assert.equal(publicSoftware.status, 200)
@@ -60,10 +87,15 @@ const login = await fetch(`${base}/api/auth/login`, {
   body: JSON.stringify({ username, password }),
 })
 assert.equal(login.status, 200)
-const cookie = login.headers.get('set-cookie')?.split(';')[0]
+const setCookie = login.headers.get('set-cookie') || ''
+const cookie = setCookie.split(';')[0]
 assert.ok(cookie)
+assert.match(cookie, /^jtwz_session=/)
+if (base.startsWith('http://')) assert.doesNotMatch(setCookie, /;\s*Secure(?:;|$)/i, 'HTTP deployment must not emit a Secure-only session cookie')
 const adminHeaders = { Cookie: cookie }
-for (const path of ['/api/versions', '/api/announcements', '/api/admin/health', '/api/admin/system/update']) {
+const currentAdmin = await fetch(`${base}/api/auth/me`, { headers: adminHeaders })
+assert.equal(currentAdmin.status, 200, 'the issued session cookie must authenticate a follow-up request')
+for (const path of ['/api/versions', '/api/announcements', '/api/admin/health', '/api/admin/system/update', '/api/admin/access']) {
   const response = await fetch(`${base}${path}`, { headers: adminHeaders })
   assert.equal(response.status, 200, `${path} should be available to the administrator`)
 }
@@ -72,3 +104,19 @@ const versionsPayload = await versionsResponse.json()
 assert.ok(Array.isArray(versionsPayload.versions))
 assert.ok(versionsPayload.versions.every((item) => 'packageCount' in item && Array.isArray(item.platforms)))
 console.log('smoke: versions, announcements and admin health passed')
+
+const certificatesResponse = await fetch(`${base}/api/certificates`, { headers: adminHeaders })
+assert.equal(certificatesResponse.status, 200)
+const certificatesPayload = await certificatesResponse.json()
+assert.ok(Array.isArray(certificatesPayload.certificates))
+const domainsResponse = await fetch(`${base}/api/domains`, { headers: adminHeaders })
+assert.equal(domainsResponse.status, 200)
+const domainsPayload = await domainsResponse.json()
+if (domainsPayload.domains.length) {
+  const diagnostics = await fetch(`${base}/api/domains/${encodeURIComponent(domainsPayload.domains[0].id)}/certificate-diagnostics`, { headers: adminHeaders })
+  assert.equal(diagnostics.status, 200)
+  const diagnosticsPayload = await diagnostics.json()
+  assert.ok(Array.isArray(diagnosticsPayload.certificates))
+  assert.ok(Array.isArray(diagnosticsPayload.failures))
+}
+console.log('smoke: certificate lifecycle diagnostics passed')

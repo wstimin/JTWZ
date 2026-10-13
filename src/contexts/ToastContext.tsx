@@ -26,7 +26,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const notify = useCallback(
     (message: string, tone: ToastTone = 'success') => {
       const id = Date.now()
-      setToasts((current) => [...current, { id, message, tone }])
+      setToasts((current) => current.some((toast) => toast.message === message) ? current : [...current, { id, message, tone }])
       window.setTimeout(() => dismiss(id), 3200)
     },
     [dismiss],

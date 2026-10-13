@@ -1,79 +1,74 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto'
-import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
+import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { resolveTxt } from 'node:dns/promises'
 import { basename, extname, resolve, sep } from 'node:path'
-import { createSessionToken, hashPassword, hashToken, verifyPassword } from './auth.js'
-import { config } from './config.js'
-import { audit, db, isHttpUrl, isValidHostname, mapDomain, mapPackage, mapSettings, mapSite, mapSoftware, mapSoftwareVersion, normalizeHostname, recordEvent } from './db.js'
+import { hashPassword, hashToken, verifyPassword } from './auth.js'
+import { config, normalizeAdminBasePath } from './config.js'
+import { audit, db, isHttpUrl, isValidHostname, mapCertificate, mapDomain, mapPackage, mapSettings, mapSite, mapSoftware, mapSoftwareVersion, normalizeHostname, recordEvent } from './db.js'
 import { clientIp, HttpError, parseCookies, readJson, sendHtml, sendJson } from './http.js'
 import { extractStaticSite } from './sitePublisher.js'
 import { completeMultipartUpload, completeStorageUpload, createMultipartPartUpload, createMultipartUpload, createStorageDownload, createStorageUpload, isStorageConfigured, localFilePath, objectStorageMode, removeObject, uploadLocal } from './objectStorage.js'
 import { dnsProviderStatus, publishVerificationRecord } from './dnsProvider.js'
-import { certificateProviderStatus, issueCertificate } from './certificateProvider.js'
-import { backupFilePath, createBackup, listBackups, restoreBackup, startBackupScheduler } from './backup.js'
+import { certificateProviderStatus, deleteCertificate, issueCertificate, type CertificateProviderResult } from './certificateProvider.js'
+import { backupFilePath, createBackup, listBackups, restoreBackupWithRollback, startBackupScheduler } from './backup.js'
 import { notificationsConfigured, notifyAlert } from './notifications.js'
 import { formatBytes, removeStoredFile, safeStoragePath, signedDownloadPath, signedStorageUpload, verifyDownloadSignature, verifyStorageUpload, writeRequestToFile } from './storage.js'
 import { checkForUpdate, installUpdate } from './updateService.js'
+import { cancelTask, createTask, findLatestTask, getTask, listTasks, recoverInterruptedTasks, updateTask } from './tasks.js'
+import { applySecurityHeaders, checkOrigin, originAllowed, requestOrigin, requireCsrf, stateMethods } from './middleware/security.js'
+import { runWithRequestContext } from './middleware/requestContext.js'
+import { getAuthenticatedAdmin } from './services/authService.js'
+import { handleAuthRoutes } from './routes/authRoutes.js'
+import { handleSecurityRoutes } from './routes/securityRoutes.js'
+import { permissionForRequest, requirePermission } from './middleware/authorization.js'
+import type { AuthenticatedRequest } from './securityTypes.js'
+import { validatePackageFile, validatePackageMetadata } from './services/uploadValidation.js'
 
 type Row = Record<string, unknown>
-type AuthenticatedRequest = IncomingMessage & { admin?: { id: string; username: string } }
-
-const loginAttempts = new Map<string, { count: number; resetAt: number }>()
 const adminRequestBuckets = new Map<string, { count: number; resetAt: number }>()
-const stateMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+let activeAdminBasePath = config.adminBasePath
+const disabledAdminBasePaths = new Set(config.disabledAdminBasePaths.filter((path) => path !== activeAdminBasePath))
+if (activeAdminBasePath !== '/admin') disabledAdminBasePaths.add('/admin')
 
-function requestOrigin(request: IncomingMessage) {
-  const protocol = String(request.headers['x-forwarded-proto'] || (config.isProduction ? 'https' : 'http')).split(',')[0].trim()
-  return `${protocol}://${request.headers.host || `${config.host}:${config.port}`}`
-}
-
-function originAllowed(request: IncomingMessage, origin: string) {
-  return origin === requestOrigin(request) || config.allowedOrigins.includes(origin.replace(/\/$/, ''))
-}
-
-function securityHeaders(request: IncomingMessage, response: ServerResponse) {
-  response.setHeader('X-Content-Type-Options', 'nosniff')
-  response.setHeader('X-Frame-Options', 'DENY')
-  response.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
-  response.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
-  const origin = request.headers.origin
-  if (origin && originAllowed(request, origin)) {
-    response.setHeader('Access-Control-Allow-Origin', origin)
-    response.setHeader('Access-Control-Allow-Credentials', 'true')
-    response.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-    response.setHeader('Access-Control-Allow-Headers', 'Content-Type')
-    response.setHeader('Vary', 'Origin')
+function adminAccess(request: IncomingMessage) {
+  const origin = requestOrigin(request)
+  return {
+    adminBasePath: activeAdminBasePath,
+    dashboardPath: activeAdminBasePath,
+    loginPath: `${activeAdminBasePath}/login`,
+    loginUrl: `${origin}${activeAdminBasePath}/login`,
   }
 }
 
-function checkOrigin(request: IncomingMessage) {
-  if (!stateMethods.has(request.method || 'GET')) return
-  const origin = request.headers.origin
-  if (origin && !originAllowed(request, origin)) throw new HttpError(403, '请求来源未被允许')
-}
-
-function sessionCookie(token: string, maxAge: number) {
-  const secure = config.isProduction ? '; Secure' : ''
-  return `${config.cookieName}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`
-}
-
-function getAdmin(request: IncomingMessage) {
-  const token = parseCookies(request)[config.cookieName]
-  if (!token) return null
-  const row = db.prepare(`SELECT admins.id, admins.username, sessions.expires_at
-    FROM sessions JOIN admins ON admins.id = sessions.admin_id
-    WHERE sessions.token_hash = ?`).get(hashToken(token)) as Row | undefined
-  if (!row) return null
-  if (Number(row.expires_at) <= Date.now()) {
-    db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hashToken(token))
-    return null
+function writeEnvironmentValues(values: Record<string, string>) {
+  const envPath = config.envPath
+  const lines = existsSync(envPath) ? readFileSync(envPath, 'utf8').split(/\r?\n/) : []
+  const seen = new Set<string>()
+  const updated = lines.filter((line, index) => line || index < lines.length - 1).map((line) => {
+    const separator = line.indexOf('=')
+    if (separator < 1) return line
+    const key = line.slice(0, separator)
+    if (!(key in values)) return line
+    seen.add(key)
+    return `${key}=${values[key]}`
+  })
+  for (const [key, value] of Object.entries(values)) {
+    if (!seen.has(key)) updated.push(`${key}=${value}`)
   }
-  return { id: String(row.id), username: String(row.username) }
+  const nextContent = `${updated.join('\n').replace(/\n+$/, '')}\n`
+  const tempPath = `${envPath}.${process.pid}.tmp`
+  writeFileSync(tempPath, nextContent, { mode: 0o600 })
+  try {
+    renameSync(tempPath, envPath)
+  } catch {
+    writeFileSync(envPath, nextContent, { mode: 0o600 })
+    rmSync(tempPath, { force: true })
+  }
 }
 
 function requireAdmin(request: AuthenticatedRequest) {
-  const admin = getAdmin(request)
+  const admin = getAuthenticatedAdmin(request)
   if (!admin) throw new HttpError(401, '请先登录管理后台')
   request.admin = admin
   return admin
@@ -106,6 +101,135 @@ function publicSettings() {
 
 function listDomains() {
   return db.prepare('SELECT * FROM domains ORDER BY created_at DESC').all().map((row) => mapDomain(row as Row))
+}
+
+function refreshCertificateStatuses(domainId = '') {
+  const now = new Date().toISOString()
+  const expiring = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+  const suffix = domainId ? ' AND domain_id = ?' : ''
+  const args = domainId ? [domainId] : []
+  db.prepare(`UPDATE certificates SET status = 'expired', updated_at = ? WHERE expires_at IS NOT NULL AND expires_at <= ? AND status IN ('active', 'expiring')${suffix}`)
+    .run(now, now, ...args)
+  db.prepare(`UPDATE certificates SET status = 'expiring', updated_at = ? WHERE expires_at IS NOT NULL AND expires_at > ? AND expires_at <= ? AND status = 'active'${suffix}`)
+    .run(now, now, expiring, ...args)
+}
+
+function listCertificates(domainId = '') {
+  refreshCertificateStatuses(domainId)
+  const where = domainId ? 'WHERE certificates.domain_id = ?' : ''
+  const rows = db.prepare(`SELECT certificates.*, domains.hostname FROM certificates JOIN domains ON domains.id = certificates.domain_id ${where} ORDER BY certificates.created_at DESC`)
+    .all(...(domainId ? [domainId] : []))
+  return rows.map((row) => mapCertificate(row as Row))
+}
+
+function syncDomainCertificateStatus(domainId: string) {
+  refreshCertificateStatuses(domainId)
+  const current = db.prepare(`SELECT status FROM certificates WHERE domain_id = ? ORDER BY
+    CASE status WHEN 'active' THEN 0 WHEN 'expiring' THEN 1 WHEN 'pending' THEN 2 WHEN 'error' THEN 3 ELSE 4 END,
+    created_at DESC LIMIT 1`).get(domainId) as Row | undefined
+  const certificateStatus = current && ['active', 'expiring'].includes(String(current.status)) ? 'active' : current?.status === 'error' ? 'error' : 'pending'
+  db.prepare('UPDATE domains SET certificate_status = ?, updated_at = ? WHERE id = ?').run(certificateStatus, new Date().toISOString(), domainId)
+  return certificateStatus
+}
+
+function saveProviderCertificate(domainId: string, result: CertificateProviderResult, existingId = '') {
+  const timestamp = new Date().toISOString()
+  const id = existingId || randomUUID()
+  if (existingId) {
+    db.prepare(`UPDATE certificates SET provider = ?, issuer = ?, serial_number = ?, external_ref = ?, issued_at = ?, expires_at = ?,
+      status = 'active', last_error = '', updated_at = ? WHERE id = ? AND domain_id = ?`)
+      .run(result.provider, result.issuer, result.serialNumber || '', result.externalRef, result.issuedAt || timestamp, result.expiresAt || null, timestamp, id, domainId)
+  } else {
+    db.prepare(`INSERT INTO certificates
+      (id, domain_id, provider, issuer, serial_number, external_ref, issued_at, expires_at, status, auto_renew, note, last_error, updated_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, '', '', ?, ?)`)
+      .run(id, domainId, result.provider, result.issuer, result.serialNumber || '', result.externalRef, result.issuedAt || timestamp, result.expiresAt || null, timestamp, timestamp)
+  }
+  syncDomainCertificateStatus(domainId)
+  return listCertificates(domainId).find((item) => item.id === id)
+}
+
+async function issueManagedCertificate(domainId: string, hostname: string, existingId = '') {
+  const provider = certificateProviderStatus()
+  if (!provider.configured) throw new HttpError(503, 'HTTPS 证书服务商尚未完成配置')
+  const timestamp = new Date().toISOString()
+  const certificateId = existingId || randomUUID()
+  if (!existingId) {
+    db.prepare(`INSERT INTO certificates
+      (id, domain_id, provider, issuer, serial_number, external_ref, issued_at, expires_at, status, auto_renew, note, last_error, updated_at, created_at)
+      VALUES (?, ?, ?, '', '', '', NULL, NULL, 'pending', 1, '', '', ?, ?)`)
+      .run(certificateId, domainId, provider.provider, timestamp, timestamp)
+  } else {
+    db.prepare("UPDATE certificates SET status = 'pending', last_error = '', updated_at = ? WHERE id = ? AND domain_id = ?")
+      .run(timestamp, certificateId, domainId)
+  }
+  try {
+    const result = await issueCertificate(hostname)
+    return saveProviderCertificate(domainId, result, certificateId)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : '证书服务商请求失败'
+    db.prepare("UPDATE certificates SET status = 'error', last_error = ?, updated_at = ? WHERE id = ? AND domain_id = ?")
+      .run(detail, new Date().toISOString(), certificateId, domainId)
+    syncDomainCertificateStatus(domainId)
+    throw error
+  }
+}
+
+async function runCertificateOperationTask(taskId: string, adminId: string | null) {
+  const task = getTask(taskId)
+  if (!task) throw new HttpError(404, '任务不存在')
+  const domainId = String(task.input.domainId || task.entityId || '')
+  const certificateId = String(task.input.certificateId || '')
+  const domain = db.prepare('SELECT hostname, dns_status FROM domains WHERE id = ?').get(domainId) as Row | undefined
+  if (!domain) throw new HttpError(404, '域名不存在')
+  if (String(domain.dns_status) !== 'verified') throw new HttpError(409, '请先完成 DNS 所有权验证')
+  updateTask(taskId, { status: 'running', progress: 15, message: '正在连接证书服务商', log: { level: 'info', message: `开始处理 ${String(domain.hostname)} 的证书` } })
+  try {
+    const certificate = await issueManagedCertificate(domainId, String(domain.hostname), certificateId)
+    const action = certificateId ? 'certificate_renewed' : 'certificate_issued'
+    audit(adminId, action, certificateId ? 'certificate' : 'domain', certificateId || domainId, String(domain.hostname))
+    updateTask(taskId, { status: 'succeeded', progress: 100, message: certificateId ? '证书续期完成' : '证书签发完成', result: { domainId, certificateId: certificate?.id || certificateId }, log: { level: 'success', message: '证书服务商已返回成功状态' } })
+    return { certificate, domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(domainId) as Row), task: getTask(taskId) }
+  } catch (error) {
+    const detail = `${String(domain.hostname)}: ${error instanceof Error ? error.message : '证书操作失败'}`
+    updateTask(taskId, { status: 'failed', message: certificateId ? '证书续期失败' : '证书签发失败', error: detail, log: { level: 'error', message: detail } })
+    audit(adminId, 'certificate_failed', 'domain', domainId, detail)
+    notifyAlert({ type: 'certificate_failed', title: certificateId ? 'HTTPS 证书续期失败' : 'HTTPS 证书签发失败', detail, entityId: domainId })
+    throw error
+  }
+}
+
+let certificateRenewalRunning = false
+
+async function renewDueCertificates() {
+  if (certificateRenewalRunning || !certificateProviderStatus().configured) return
+  certificateRenewalRunning = true
+  try {
+    const renewBefore = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+    const due = db.prepare(`SELECT certificates.id, certificates.domain_id, domains.hostname FROM certificates
+      JOIN domains ON domains.id = certificates.domain_id
+      WHERE certificates.auto_renew = 1 AND certificates.provider <> 'manual' AND certificates.expires_at IS NOT NULL
+        AND certificates.expires_at <= ? AND certificates.status IN ('active', 'expiring', 'error')
+      ORDER BY certificates.expires_at ASC LIMIT 25`).all(renewBefore) as Row[]
+    for (const item of due) {
+      try {
+        await issueManagedCertificate(String(item.domain_id), String(item.hostname), String(item.id))
+        audit(null, 'certificate_auto_renewed', 'certificate', String(item.id), String(item.hostname))
+      } catch (error) {
+        const detail = `${String(item.hostname)}: ${error instanceof Error ? error.message : '自动续期失败'}`
+        audit(null, 'certificate_failed', 'domain', String(item.domain_id), detail)
+        notifyAlert({ type: 'certificate_failed', title: 'HTTPS 证书自动续期失败', detail, entityId: String(item.domain_id) })
+      }
+    }
+  } finally {
+    certificateRenewalRunning = false
+  }
+}
+
+function startCertificateRenewalScheduler() {
+  const timer = setInterval(() => { void renewDueCertificates() }, 6 * 60 * 60 * 1000)
+  timer.unref()
+  setTimeout(() => { void renewDueCertificates() }, 30_000).unref()
 }
 
 function listRedirectRules() {
@@ -202,6 +326,69 @@ function optionalIsoDate(value: unknown, label: string) {
   return new Date(timestamp).toISOString()
 }
 
+async function publishSiteTask(taskId: string, adminId: string | null) {
+  const task = getTask(taskId)
+  if (!task) throw new HttpError(404, '任务不存在')
+  const siteId = String(task.input.siteId || task.entityId || '')
+  const sourceName = safeFileName(String(task.input.sourceName || 'website.zip'))
+  const zipPath = resolve(String(task.input.zipPath || ''))
+  const site = db.prepare('SELECT name FROM sites WHERE id = ?').get(siteId) as Row | undefined
+  if (!site) throw new HttpError(404, '静态网站不存在')
+  if (!existsSync(zipPath)) throw new HttpError(409, '发布源文件已经不存在，无法重试；请重新上传 ZIP')
+  const versionId = randomUUID()
+  const releasePath = resolve(config.siteReleasesDir, siteId, versionId)
+  updateTask(taskId, { status: 'running', progress: 35, message: '正在安全解压网站文件', log: { level: 'info', message: '开始检查 ZIP 路径、文件类型与解压体积' } })
+  try {
+    const result = await extractStaticSite(zipPath, releasePath)
+    updateTask(taskId, { progress: 72, message: '安全检查通过，正在写入版本记录', log: { level: 'success', message: `安全解压完成：${result.files} 个文件，${formatBytes(result.totalBytes)}` } })
+    const archive = readFileSync(zipPath)
+    const archiveSha256 = createHash('sha256').update(archive).digest('hex')
+    const timestamp = new Date().toISOString()
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      db.prepare(`INSERT INTO site_versions (id, site_id, release_path, source_name, file_count, byte_size, sha256, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(versionId, siteId, releasePath, sourceName, result.files, result.totalBytes, archiveSha256, timestamp)
+      db.prepare("UPDATE sites SET current_version_id = ?, status = 'published', updated_at = ? WHERE id = ?")
+        .run(versionId, timestamp, siteId)
+      db.exec('COMMIT')
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw error
+    }
+    audit(adminId, 'publish', 'site', siteId, `${sourceName} / ${result.files} files / SHA-256 ${archiveSha256}`)
+    updateTask(taskId, { status: 'succeeded', progress: 100, message: '网站新版本已发布', result: { siteId, versionId, fileCount: result.files, byteSize: result.totalBytes, sha256: archiveSha256 }, log: { level: 'success', message: '版本记录已提交并切换为当前版本' } })
+    rmSync(zipPath, { force: true })
+    return { site: mapSite(db.prepare('SELECT * FROM sites WHERE id = ?').get(siteId) as Row), task: getTask(taskId) }
+  } catch (error) {
+    rmSync(releasePath, { recursive: true, force: true })
+    const detail = error instanceof Error ? error.message : '网站发布失败'
+    updateTask(taskId, { status: 'failed', message: '网站发布失败', error: detail, log: { level: 'error', message: detail } })
+    throw error
+  }
+}
+
+async function rollbackSiteTask(taskId: string, adminId: string | null) {
+  const task = getTask(taskId)
+  if (!task) throw new HttpError(404, '任务不存在')
+  const siteId = String(task.input.siteId || task.entityId || '')
+  const versionId = String(task.input.versionId || '')
+  updateTask(taskId, { status: 'running', progress: 30, message: '正在验证目标版本', log: { level: 'info', message: '检查版本记录与发布目录' } })
+  try {
+    const version = db.prepare('SELECT id, release_path FROM site_versions WHERE id = ? AND site_id = ?').get(versionId, siteId) as Row | undefined
+    if (!version || !existsSync(String(version.release_path))) throw new HttpError(404, '发布版本或版本文件不存在')
+    db.prepare("UPDATE sites SET current_version_id = ?, status = 'published', updated_at = ? WHERE id = ?")
+      .run(versionId, new Date().toISOString(), siteId)
+    audit(adminId, 'rollback', 'site', siteId, versionId)
+    updateTask(taskId, { status: 'succeeded', progress: 100, message: '网站版本回滚完成', result: { siteId, versionId }, log: { level: 'success', message: '目标版本已经恢复并重新上线' } })
+    return { site: mapSite(db.prepare('SELECT * FROM sites WHERE id = ?').get(siteId) as Row), task: getTask(taskId) }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : '版本回滚失败'
+    updateTask(taskId, { status: 'failed', message: '网站版本回滚失败', error: detail, log: { level: 'error', message: detail } })
+    throw error
+  }
+}
+
 function assertRedirectRuleSafe(domainId: string, sourcePath: string, target: string, currentId = '') {
   const domain = db.prepare('SELECT hostname FROM domains WHERE id = ?').get(domainId) as Row | undefined
   if (!domain) throw new HttpError(404, '来源域名不存在')
@@ -287,6 +474,7 @@ function buildSystemHealth() {
   checks.push({ id: 'certificate', label: 'HTTPS 证书', status: certificateProviderStatus().configured ? 'ok' : 'warning', detail: certificateProviderStatus().configured ? `${certificateProviderStatus().provider} 适配器可用` : '等待证书服务商配置' })
   checks.push({ id: 'notifications', label: '告警通知', status: notificationsConfigured() ? 'ok' : 'warning', detail: notificationsConfigured() ? '签名 Webhook 已配置' : '未配置外部通知通道' })
   checks.push({ id: 'backup', label: '备份目录', status: existsSync(config.backupDir) ? 'ok' : 'error', detail: existsSync(config.backupDir) ? `${listBackups().length} 个本地备份可用` : '备份目录不存在' })
+  checks.push({ id: 'update-signing', label: '更新签名', status: config.updateManifestUrl && config.updatePublicKey ? 'ok' : 'warning', detail: config.updateManifestUrl && config.updatePublicKey ? 'Ed25519 更新清单校验已配置' : '发布前需要配置更新清单地址和 Ed25519 公钥' })
   return { overall: checks.some((check) => check.status === 'error') ? 'degraded' : 'ok', checkedAt: new Date().toISOString(), checks }
 }
 
@@ -295,7 +483,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
   checkOrigin(request)
 
   if (method === 'GET' && url.pathname === '/api/health') {
-    sendJson(response, 200, { ok: true, service: 'aurelia-api', time: new Date().toISOString() })
+    sendJson(response, 200, { ok: true, service: 'jtwz-api', time: new Date().toISOString() })
     return
   }
   if (method === 'GET' && url.pathname === '/api/public/settings') {
@@ -349,17 +537,29 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
 
   const certificateCallbackMatch = url.pathname.match(/^\/api\/public\/domains\/([^/]+)\/certificate-callback$/)
   if (certificateCallbackMatch && method === 'POST') {
-    const callbackToken = String(request.headers['x-aurelia-callback-token'] || '')
+    const callbackToken = String(request.headers['x-jtwz-callback-token'] || request.headers['x-aurelia-callback-token'] || '')
     const expectedCallbackToken = Buffer.from(config.certificateCallbackSecret)
     const actualCallbackToken = Buffer.from(callbackToken)
     if (!callbackToken || expectedCallbackToken.length !== actualCallbackToken.length || !timingSafeEqual(expectedCallbackToken, actualCallbackToken)) throw new HttpError(401, '证书回调凭证无效')
     const id = decodeURIComponent(certificateCallbackMatch[1])
     const row = db.prepare('SELECT hostname FROM domains WHERE id = ?').get(id) as Row | undefined
     if (!row) throw new HttpError(404, '域名不存在')
-    const body = await readJson<{ status?: string; detail?: string }>(request)
+    const body = await readJson<{ status?: string; detail?: string; externalRef?: string; issuer?: string; serialNumber?: string; issuedAt?: string; expiresAt?: string }>(request)
     const status = parseStatus(body.status, ['pending', 'active', 'error'], 'pending')
     const timestamp = new Date().toISOString()
-    db.prepare('UPDATE domains SET certificate_status = ?, updated_at = ? WHERE id = ?').run(status, timestamp, id)
+    const pending = db.prepare("SELECT id FROM certificates WHERE domain_id = ? AND provider = 'webhook' AND status = 'pending' ORDER BY created_at DESC LIMIT 1").get(id) as Row | undefined
+    if (status === 'active') {
+      saveProviderCertificate(id, {
+        provider: 'webhook', status: 'active', externalRef: String(body.externalRef || 'webhook'), issuer: String(body.issuer || 'Webhook certificate provider'),
+        serialNumber: String(body.serialNumber || ''), issuedAt: body.issuedAt || timestamp, expiresAt: body.expiresAt,
+      }, pending ? String(pending.id) : '')
+    } else if (pending) {
+      db.prepare('UPDATE certificates SET status = ?, last_error = ?, updated_at = ? WHERE id = ?')
+        .run(status, status === 'error' ? String(body.detail || '外部证书服务回调失败') : '', timestamp, String(pending.id))
+      syncDomainCertificateStatus(id)
+    } else {
+      db.prepare('UPDATE domains SET certificate_status = ?, updated_at = ? WHERE id = ?').run(status, timestamp, id)
+    }
     audit(null, `certificate_callback_${status}`, 'domain', id, String(body.detail || row.hostname))
     if (status === 'error') notifyAlert({ type: 'certificate_failed', title: '外部证书服务回调失败', detail: String(body.detail || row.hostname), entityId: id })
     sendJson(response, 200, { ok: true, domainId: id, status })
@@ -408,50 +608,13 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     return
   }
 
-  if (method === 'POST' && url.pathname === '/api/auth/login') {
-    const ip = clientIp(request)
-    const attempt = loginAttempts.get(ip)
-    if (attempt && attempt.resetAt > Date.now() && attempt.count >= 5) throw new HttpError(429, '登录尝试过多，请 15 分钟后再试')
-    if (attempt && attempt.resetAt <= Date.now()) loginAttempts.delete(ip)
-
-    const body = await readJson<{ username?: string; password?: string }>(request)
-    const username = String(body.username || '').trim()
-    const password = String(body.password || '')
-    const row = db.prepare('SELECT * FROM admins WHERE username = ?').get(username) as Row | undefined
-    if (!row || !verifyPassword(password, String(row.password_hash))) {
-      const current = loginAttempts.get(ip)
-      loginAttempts.set(ip, { count: (current?.count || 0) + 1, resetAt: current?.resetAt || Date.now() + 15 * 60 * 1000 })
-      throw new HttpError(401, '账号或密码错误')
-    }
-
-    loginAttempts.delete(ip)
-    const token = createSessionToken()
-    const expiresAt = Date.now() + config.sessionDays * 24 * 60 * 60 * 1000
-    db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now())
-    db.prepare('INSERT INTO sessions (id, admin_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(randomUUID(), String(row.id), hashToken(token), expiresAt, new Date().toISOString())
-    audit(String(row.id), 'login', 'session', '', `IP: ${ip}`)
-    response.setHeader('Set-Cookie', sessionCookie(token, config.sessionDays * 24 * 60 * 60))
-    sendJson(response, 200, { admin: { id: String(row.id), username: String(row.username) } })
-    return
-  }
-
-  if (method === 'POST' && url.pathname === '/api/auth/logout') {
-    const token = parseCookies(request)[config.cookieName]
-    if (token) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hashToken(token))
-    response.setHeader('Set-Cookie', sessionCookie('', 0))
-    sendJson(response, 200, { ok: true })
-    return
-  }
-
-  if (method === 'GET' && url.pathname === '/api/auth/me') {
-    const admin = requireAdmin(request)
-    sendJson(response, 200, { admin })
-    return
-  }
+  if (await handleAuthRoutes(request, response, url)) return
 
   const admin = requireAdmin(request)
   enforceAdminRateLimit(request, admin.id)
+  requireCsrf(request, admin.csrfToken)
+  if (await handleSecurityRoutes(request, response, url)) return
+  requirePermission(admin, permissionForRequest(method, url.pathname))
 
   if (method === 'PUT' && url.pathname === '/api/admin/account') {
     const body = await readJson<{ currentPassword?: string; newPassword?: string; newUsername?: string }>(request)
@@ -459,15 +622,47 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const newPassword = String(body.newPassword || '')
     const newUsername = String(body.newUsername || admin.username).trim()
     const row = db.prepare('SELECT password_hash FROM admins WHERE id = ?').get(admin.id) as Row | undefined
-    if (!row || !verifyPassword(currentPassword, String(row.password_hash))) throw new HttpError(401, '当前密码不正确')
+    if (!row || !verifyPassword(currentPassword, String(row.password_hash))) throw new HttpError(400, '当前密码不正确')
     if (!/^[A-Za-z0-9._-]{3,64}$/.test(newUsername)) throw new HttpError(400, '管理员账号需为 3-64 位字母、数字、点、下划线或短横线')
-    if (newPassword.length < 10 || newPassword.length > 160) throw new HttpError(400, '新密码长度需要在 10 到 160 个字符之间')
-    if (!/[A-Za-z]/.test(newPassword) || !/\d/.test(newPassword)) throw new HttpError(400, '新密码至少需要包含字母和数字')
+    if (newPassword.length < 6 || newPassword.length > 160) throw new HttpError(400, '新密码长度需要在 6 到 160 个字符之间')
     const conflict = db.prepare('SELECT id FROM admins WHERE username = ? AND id <> ?').get(newUsername, admin.id)
     if (conflict) throw new HttpError(409, '新的管理员账号已经存在')
     db.prepare('UPDATE admins SET username = ?, password_hash = ? WHERE id = ?').run(newUsername, hashPassword(newPassword), admin.id)
+    const currentToken = parseCookies(request)[config.cookieName]
+    if (currentToken) db.prepare('DELETE FROM sessions WHERE admin_id = ? AND token_hash <> ?').run(admin.id, hashToken(currentToken))
     audit(admin.id, 'account_change', 'admin', admin.id, `账号更新为 ${newUsername}`)
     sendJson(response, 200, { ok: true })
+    return
+  }
+
+  if (method === 'GET' && url.pathname === '/api/admin/access') {
+    sendJson(response, 200, { access: adminAccess(request) })
+    return
+  }
+
+  if (method === 'PUT' && url.pathname === '/api/admin/access') {
+    const body = await readJson<{ currentPassword?: string; adminBasePath?: string }>(request)
+    const row = db.prepare('SELECT password_hash FROM admins WHERE id = ?').get(admin.id) as Row | undefined
+    if (!row || !verifyPassword(String(body.currentPassword || ''), String(row.password_hash))) throw new HttpError(400, '当前密码不正确')
+    let nextPath: string
+    try {
+      nextPath = normalizeAdminBasePath(body.adminBasePath)
+    } catch (error) {
+      throw new HttpError(400, error instanceof Error ? error.message : '管理入口后缀无效')
+    }
+    if (nextPath !== activeAdminBasePath) {
+      disabledAdminBasePaths.add(activeAdminBasePath)
+      disabledAdminBasePaths.delete(nextPath)
+      const previousPath = activeAdminBasePath
+      activeAdminBasePath = nextPath
+      writeEnvironmentValues({
+        ADMIN_BASE_PATH: activeAdminBasePath,
+        ADMIN_DISABLED_PATHS: [...disabledAdminBasePaths].join(','),
+        ADMIN_LOGIN_URL: `${config.adminAppOrigin.replace(/\/$/, '')}${activeAdminBasePath}/login`,
+      })
+      audit(admin.id, 'update', 'admin_access', '', `${previousPath} -> ${activeAdminBasePath}`)
+    }
+    sendJson(response, 200, { access: adminAccess(request) })
     return
   }
 
@@ -475,12 +670,71 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const domains = listDomains()
     const sites = db.prepare('SELECT * FROM sites ORDER BY created_at ASC').all().map((row) => mapSite(row as Row))
     const software = db.prepare('SELECT * FROM software ORDER BY created_at ASC').all().map((row) => mapSoftware(row as Row))
-    const audits = db.prepare('SELECT action, entity_type AS entityType, entity_id AS entityId, detail, created_at AS createdAt FROM audit_logs ORDER BY created_at DESC LIMIT 20').all()
+    const audits = db.prepare(`SELECT audit_logs.action, audit_logs.entity_type AS entityType, audit_logs.entity_id AS entityId, audit_logs.detail,
+      audit_logs.request_id AS requestId, audit_logs.ip_address AS ipAddress, COALESCE(admins.display_name, admins.username, '系统') AS adminName,
+      audit_logs.created_at AS createdAt FROM audit_logs LEFT JOIN admins ON admins.id = audit_logs.admin_id ORDER BY audit_logs.created_at DESC LIMIT 20`).all()
     sendJson(response, 200, {
-      settings: publicSettings(), domains, sites, software, packages: packagesWithUrls(), redirectRules: listRedirectRules(), audits,
-      analytics: buildAnalytics(30), storage: { provider: objectStorageMode, directUpload: true, configured: isStorageConfigured() }, dns: dnsProviderStatus(), certificate: certificateProviderStatus(), alerts: buildAlerts(), notifications: { configured: notificationsConfigured() },
+      settings: publicSettings(), domains, sites, software, packages: packagesWithUrls(), redirectRules: listRedirectRules(), audits: admin.permissions.includes('audit.read') ? audits : [],
+      analytics: admin.permissions.includes('analytics.read') ? buildAnalytics(30) : null, storage: { provider: objectStorageMode, directUpload: true, configured: isStorageConfigured() }, dns: dnsProviderStatus(), certificate: certificateProviderStatus(), alerts: buildAlerts(), notifications: { configured: notificationsConfigured() },
     })
     return
+  }
+
+  if (method === 'GET' && url.pathname === '/api/tasks') {
+    const status = String(url.searchParams.get('status') || '')
+    if (status && !['queued', 'running', 'succeeded', 'failed', 'cancelled'].includes(status)) throw new HttpError(400, '任务状态筛选无效')
+    sendJson(response, 200, { tasks: listTasks({ status, entityType: String(url.searchParams.get('entityType') || ''), entityId: String(url.searchParams.get('entityId') || ''), limit: Number(url.searchParams.get('limit') || 100) }) })
+    return
+  }
+  const taskMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/)
+  if (taskMatch && method === 'GET') {
+    const task = getTask(decodeURIComponent(taskMatch[1]))
+    if (!task) throw new HttpError(404, '任务不存在')
+    sendJson(response, 200, { task })
+    return
+  }
+  const taskCancelMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/)
+  if (taskCancelMatch && method === 'POST') {
+    const task = cancelTask(decodeURIComponent(taskCancelMatch[1]))
+    if (!task) throw new HttpError(404, '任务不存在')
+    audit(admin.id, 'task_cancel', 'task', task.id, task.label)
+    sendJson(response, 200, { task })
+    return
+  }
+  const taskRetryMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/retry$/)
+  if (taskRetryMatch && method === 'POST') {
+    const source = getTask(decodeURIComponent(taskRetryMatch[1]))
+    if (!source) throw new HttpError(404, '任务不存在')
+    if (!source.retryable || source.status !== 'failed') throw new HttpError(409, '该任务当前不能重试')
+    const retry = createTask({ kind: source.kind, label: source.label, entityType: source.entityType, entityId: source.entityId, input: source.input, retryable: true, retryOf: source.id })
+    audit(admin.id, 'task_retry', 'task', retry.id, `${source.id} → ${retry.id}`)
+    if (['certificate_issue', 'certificate_renew'].includes(retry.kind)) {
+      const result = await runCertificateOperationTask(retry.id, admin.id)
+      sendJson(response, 200, result)
+      return
+    }
+    if (retry.kind === 'site_publish') {
+      sendJson(response, 200, await publishSiteTask(retry.id, admin.id))
+      return
+    }
+    if (retry.kind === 'site_rollback') {
+      sendJson(response, 200, await rollbackSiteTask(retry.id, admin.id))
+      return
+    }
+    if (retry.kind === 'package_upload') {
+      const uploadId = String(retry.input.uploadId || retry.entityId)
+      const session = db.prepare("SELECT * FROM upload_sessions WHERE id = ? AND status IN ('uploading', 'paused', 'failed')").get(uploadId) as Row | undefined
+      if (!session) {
+        updateTask(retry.id, { status: 'failed', message: '续传会话不存在', error: '服务器已清理临时分片，请重新上传文件', log: { level: 'error', message: '没有找到可恢复的上传会话' } })
+        throw new HttpError(409, '服务器已清理临时分片，请重新上传文件')
+      }
+      db.prepare("UPDATE upload_sessions SET status = 'paused', updated_at = ? WHERE id = ?").run(new Date().toISOString(), uploadId)
+      const received = JSON.parse(String(session.received_chunks || '[]')) as number[]
+      updateTask(retry.id, { status: 'running', progress: Math.round(received.length / Number(session.total_chunks) * 90), message: '请到安装包页面重新选择原文件继续上传', log: { level: 'info', message: `服务器保留 ${received.length}/${Number(session.total_chunks)} 个分片` } })
+      sendJson(response, 200, { task: getTask(retry.id), uploadId })
+      return
+    }
+    throw new HttpError(409, '该任务类型尚不支持自动重试')
   }
 
   if (method === 'GET' && url.pathname === '/api/analytics') {
@@ -578,6 +832,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     let status = parseStatus(body.status, ['draft', 'published', 'archived'], 'draft')
     const isRecommended = body.isRecommended === true
     if (isRecommended) status = 'published'
+    if (status === 'published') throw new HttpError(409, '请先创建草稿版本并上传至少一个可用安装包，再发布版本')
     const id = randomUUID()
     const timestamp = new Date().toISOString()
     db.exec('BEGIN IMMEDIATE')
@@ -612,6 +867,10 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const isRecommended = body.isRecommended === undefined ? Boolean(current.is_recommended) : body.isRecommended === true
     if (!version || version.length > 80) throw new HttpError(400, '请输入有效版本号')
     if (isRecommended) status = 'published'
+    if (status === 'published') {
+      const availablePackages = Number((db.prepare("SELECT COUNT(*) AS count FROM packages WHERE version_id = ? AND status = 'available'").get(id) as Row).count)
+      if (!availablePackages) throw new HttpError(409, '发布版本前至少需要一个可用安装包')
+    }
     const timestamp = new Date().toISOString()
     db.exec('BEGIN IMMEDIATE')
     try {
@@ -704,13 +963,17 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
   }
   if (method === 'POST' && url.pathname === '/api/admin/import') {
     const restoreId = randomUUID()
-    const archivePath = resolve(config.tempDir, `restore-upload-${restoreId}.aurelia-backup`)
+    const archivePath = resolve(config.tempDir, `restore-upload-${restoreId}.jtwz-backup`)
     try {
       await writeRequestToFile(request, archivePath, config.maxBackupBytes)
-      const rollbackBackup = await createBackup()
-      const restored = await restoreBackup(archivePath)
-      audit(admin.id, 'restore', 'database', '1', `来源 ${restored.sourceExportedAt} / 回滚备份 ${rollbackBackup.fileName}`)
-      sendJson(response, 200, { ok: true, restored, rollbackBackup })
+      const result = await restoreBackupWithRollback(archivePath)
+      if (result.restored.adminBasePath) {
+        disabledAdminBasePaths.add(activeAdminBasePath)
+        activeAdminBasePath = normalizeAdminBasePath(result.restored.adminBasePath)
+        disabledAdminBasePaths.delete(activeAdminBasePath)
+      }
+      audit(null, 'restore', 'database', '1', `来源 ${result.restored.sourceExportedAt} / 回滚备份 ${result.rollbackBackup.fileName}`)
+      sendJson(response, 200, { ok: true, ...result })
     } finally {
       rmSync(archivePath, { force: true })
     }
@@ -730,6 +993,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     if (!allowedModes.includes(mode)) throw new HttpError(400, '运行模式无效')
     const target = String(body.target || '').trim()
     if (['redirect', 'download'].includes(mode) && target) normalizeTarget(target)
+    if (mode === 'site' && !db.prepare("SELECT id FROM sites WHERE id = ? AND status = 'published'").get(target)) throw new HttpError(409, '请选择一个已经发布的静态网站')
     const id = randomUUID()
     const verificationToken = randomUUID()
     const timestamp = new Date().toISOString()
@@ -760,6 +1024,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     if (!['active', 'pending', 'paused', 'error'].includes(status)) throw new HttpError(400, '域名状态无效')
     if (status === 'active' && String(current.dns_status) !== 'verified') throw new HttpError(409, '域名尚未完成 DNS 所有权验证，不能启用')
     if (['redirect', 'download'].includes(mode)) normalizeTarget(target)
+    if (mode === 'site' && !db.prepare("SELECT id FROM sites WHERE id = ? AND status = 'published'").get(target)) throw new HttpError(409, '请选择一个已经发布的静态网站')
     const redirectCode = Number(body.redirectCode ?? current.redirect_code) === 301 ? 301 : 302
     const preservePath = body.preservePath === undefined ? Number(current.preserve_path) : body.preservePath ? 1 : 0
     const preserveQuery = body.preserveQuery === undefined ? Number(current.preserve_query) : body.preserveQuery ? 1 : 0
@@ -781,6 +1046,88 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     return
   }
 
+  if (method === 'GET' && url.pathname === '/api/certificates') {
+    const domainId = String(url.searchParams.get('domainId') || '')
+    if (domainId && !db.prepare('SELECT id FROM domains WHERE id = ?').get(domainId)) throw new HttpError(404, '域名不存在')
+    sendJson(response, 200, { certificates: listCertificates(domainId) })
+    return
+  }
+  const domainCertificatesMatch = url.pathname.match(/^\/api\/domains\/([^/]+)\/certificates$/)
+  if (domainCertificatesMatch && method === 'POST') {
+    const domainId = decodeURIComponent(domainCertificatesMatch[1])
+    const domain = db.prepare('SELECT hostname, dns_status FROM domains WHERE id = ?').get(domainId) as Row | undefined
+    if (!domain) throw new HttpError(404, '域名不存在')
+    if (String(domain.dns_status) !== 'verified') throw new HttpError(409, '请先完成 DNS 所有权验证')
+    const body = await readJson<Record<string, unknown>>(request)
+    const issuer = String(body.issuer || '').trim().slice(0, 240)
+    const expiresAt = optionalIsoDate(body.expiresAt, '到期时间')
+    const issuedAt = optionalIsoDate(body.issuedAt, '签发时间') || new Date().toISOString()
+    if (!issuer) throw new HttpError(400, '请填写证书签发机构')
+    if (!expiresAt) throw new HttpError(400, '请填写证书到期时间')
+    const expiresTime = Date.parse(expiresAt)
+    const status = expiresTime <= Date.now() ? 'expired' : expiresTime <= Date.now() + 30 * 24 * 60 * 60 * 1000 ? 'expiring' : 'active'
+    const id = randomUUID()
+    const timestamp = new Date().toISOString()
+    db.prepare(`INSERT INTO certificates
+      (id, domain_id, provider, issuer, serial_number, external_ref, issued_at, expires_at, status, auto_renew, note, last_error, updated_at, created_at)
+      VALUES (?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)`)
+      .run(id, domainId, issuer, String(body.serialNumber || '').trim().slice(0, 240), String(body.externalRef || '').trim().slice(0, 500), issuedAt, expiresAt, status, body.autoRenew ? 1 : 0, String(body.note || '').trim().slice(0, 1000), timestamp, timestamp)
+    syncDomainCertificateStatus(domainId)
+    audit(admin.id, 'certificate_add', 'certificate', id, `${String(domain.hostname)} / ${issuer} / ${expiresAt}`)
+    sendJson(response, 201, { certificate: listCertificates(domainId).find((item) => item.id === id), domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(domainId) as Row) })
+    return
+  }
+  const certificateDiagnosticsMatch = url.pathname.match(/^\/api\/domains\/([^/]+)\/certificate-diagnostics$/)
+  if (certificateDiagnosticsMatch && method === 'GET') {
+    const domainId = decodeURIComponent(certificateDiagnosticsMatch[1])
+    const domain = db.prepare('SELECT * FROM domains WHERE id = ?').get(domainId) as Row | undefined
+    if (!domain) throw new HttpError(404, '域名不存在')
+    const failures = db.prepare(`SELECT action, detail, created_at AS createdAt FROM audit_logs
+      WHERE entity_id = ? AND action IN ('certificate_failed', 'certificate_callback_error') ORDER BY created_at DESC LIMIT 10`).all(domainId)
+    sendJson(response, 200, { domain: mapDomain(domain), provider: certificateProviderStatus(), certificates: listCertificates(domainId), failures })
+    return
+  }
+  const certificateMatch = url.pathname.match(/^\/api\/certificates\/([^/]+)$/)
+  if (certificateMatch && method === 'PATCH') {
+    const id = decodeURIComponent(certificateMatch[1])
+    const current = db.prepare('SELECT certificates.*, domains.hostname FROM certificates JOIN domains ON domains.id = certificates.domain_id WHERE certificates.id = ?').get(id) as Row | undefined
+    if (!current) throw new HttpError(404, '证书记录不存在')
+    const body = await readJson<Record<string, unknown>>(request)
+    const issuer = String(body.issuer ?? current.issuer).trim().slice(0, 240)
+    const expiresAt = body.expiresAt === undefined ? (current.expires_at ? String(current.expires_at) : null) : optionalIsoDate(body.expiresAt, '到期时间')
+    const note = String(body.note ?? current.note).trim().slice(0, 1000)
+    const autoRenew = body.autoRenew === undefined ? Number(current.auto_renew) : body.autoRenew ? 1 : 0
+    if (!issuer) throw new HttpError(400, '证书签发机构不能为空')
+    if (autoRenew && String(current.provider) === 'manual') throw new HttpError(409, '外部证书不能自动续期；请接入证书服务商后执行续期')
+    db.prepare('UPDATE certificates SET issuer = ?, expires_at = ?, auto_renew = ?, note = ?, updated_at = ? WHERE id = ?')
+      .run(issuer, expiresAt, autoRenew, note, new Date().toISOString(), id)
+    syncDomainCertificateStatus(String(current.domain_id))
+    audit(admin.id, 'certificate_update', 'certificate', id, `${String(current.hostname)} / 自动续期 ${Boolean(autoRenew) ? '开启' : '关闭'}`)
+    sendJson(response, 200, { certificate: listCertificates(String(current.domain_id)).find((item) => item.id === id), domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(String(current.domain_id)) as Row) })
+    return
+  }
+  if (certificateMatch && method === 'DELETE') {
+    const id = decodeURIComponent(certificateMatch[1])
+    const current = db.prepare('SELECT certificates.*, domains.hostname FROM certificates JOIN domains ON domains.id = certificates.domain_id WHERE certificates.id = ?').get(id) as Row | undefined
+    if (!current) throw new HttpError(404, '证书记录不存在')
+    await deleteCertificate(String(current.hostname), String(current.external_ref || ''))
+    db.prepare('DELETE FROM certificates WHERE id = ?').run(id)
+    syncDomainCertificateStatus(String(current.domain_id))
+    audit(admin.id, 'certificate_delete', 'certificate', id, `${String(current.hostname)} / ${String(current.issuer)}`)
+    sendJson(response, 200, { ok: true, domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(String(current.domain_id)) as Row) })
+    return
+  }
+  const certificateRenewMatch = url.pathname.match(/^\/api\/certificates\/([^/]+)\/renew$/)
+  if (certificateRenewMatch && method === 'POST') {
+    const id = decodeURIComponent(certificateRenewMatch[1])
+    const current = db.prepare('SELECT certificates.*, domains.hostname, domains.dns_status FROM certificates JOIN domains ON domains.id = certificates.domain_id WHERE certificates.id = ?').get(id) as Row | undefined
+    if (!current) throw new HttpError(404, '证书记录不存在')
+    if (String(current.dns_status) !== 'verified') throw new HttpError(409, '域名 DNS 所有权验证已失效，请重新验证')
+    const task = createTask({ kind: 'certificate_renew', label: `续期 ${String(current.hostname)} 的 HTTPS 证书`, entityType: 'domain', entityId: String(current.domain_id), input: { domainId: String(current.domain_id), certificateId: id }, retryable: true })
+    sendJson(response, 200, await runCertificateOperationTask(task.id, admin.id))
+    return
+  }
+
   const dnsInstructionsMatch = url.pathname.match(/^\/api\/domains\/([^/]+)\/dns-instructions$/)
   if (dnsInstructionsMatch && method === 'GET') {
     const id = decodeURIComponent(dnsInstructionsMatch[1])
@@ -789,9 +1136,9 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     sendJson(response, 200, {
       instructions: {
         type: 'TXT',
-        name: '_aurelia-verify',
-        fullName: `_aurelia-verify.${String(row.hostname)}`,
-        value: `aurelia-verify=${String(row.verification_token)}`,
+        name: '_jtwz-verify',
+        fullName: `_jtwz-verify.${String(row.hostname)}`,
+        value: `jtwz-verify=${String(row.verification_token)}`,
         dnsStatus: String(row.dns_status),
         certificateStatus: String(row.certificate_status),
         lastVerifiedAt: row.last_verified_at ? String(row.last_verified_at) : undefined,
@@ -807,8 +1154,8 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const row = db.prepare('SELECT hostname, verification_token FROM domains WHERE id = ?').get(id) as Row | undefined
     if (!row) throw new HttpError(404, '域名不存在')
     const hostname = String(row.hostname)
-    const recordName = `_aurelia-verify.${hostname}`
-    const result = await publishVerificationRecord(hostname, recordName, `aurelia-verify=${String(row.verification_token)}`)
+    const recordName = `_jtwz-verify.${hostname}`
+    const result = await publishVerificationRecord(hostname, recordName, `jtwz-verify=${String(row.verification_token)}`)
     audit(admin.id, 'dns_publish', 'domain', id, `${hostname} / ${result.action}`)
     sendJson(response, 200, { ok: true, ...result })
     return
@@ -819,10 +1166,16 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const row = db.prepare('SELECT hostname, verification_token FROM domains WHERE id = ?').get(id) as Row | undefined
     if (!row) throw new HttpError(404, '域名不存在')
     const hostname = String(row.hostname)
-    const expected = `aurelia-verify=${String(row.verification_token)}`
+    const expected = `jtwz-verify=${String(row.verification_token)}`
+    const legacyExpected = `aurelia-verify=${String(row.verification_token)}`
     let records: string[][] = []
     try {
-      records = await resolveTxt(`_aurelia-verify.${hostname}`)
+      records = await resolveTxt(`_jtwz-verify.${hostname}`).catch(() => [] as string[][])
+      if (!records.some((parts) => parts.join('') === expected)) {
+        const legacyRecords = await resolveTxt(`_aurelia-verify.${hostname}`).catch(() => [] as string[][])
+        records.push(...legacyRecords)
+      }
+      if (!records.length) throw new Error('DNS TXT 记录不存在')
     } catch (error) {
       db.prepare("UPDATE domains SET dns_status = 'error', updated_at = ? WHERE id = ?").run(new Date().toISOString(), id)
       const detail = `${hostname}: ${error instanceof Error ? error.message : 'DNS 查询失败'}`
@@ -830,23 +1183,21 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
       notifyAlert({ type: 'dns_verify_failed', title: 'DNS 所有权验证失败', detail, entityId: id })
       throw new HttpError(409, '暂未查询到验证记录。DNS 生效通常需要几分钟，请稍后重试。')
     }
-    const verified = records.some((parts) => parts.join('') === expected)
+    const verified = records.some((parts) => [expected, legacyExpected].includes(parts.join('')))
     if (!verified) {
       db.prepare("UPDATE domains SET dns_status = 'error', updated_at = ? WHERE id = ?").run(new Date().toISOString(), id)
       throw new HttpError(409, 'TXT 记录已查询到，但记录值不匹配')
     }
     const timestamp = new Date().toISOString()
-    let certificateStatus: 'pending' | 'active' = 'pending'
+    let certificateStatus: 'pending' | 'active' | 'error' = 'pending'
     const settings = publicSettings()
     if (settings.autoHttps && certificateProviderStatus().configured) {
       try {
-        await issueCertificate(hostname)
+        const task = createTask({ kind: 'certificate_issue', label: `签发 ${hostname} 的 HTTPS 证书`, entityType: 'domain', entityId: id, input: { domainId: id }, retryable: true })
+        await runCertificateOperationTask(task.id, admin.id)
         certificateStatus = 'active'
-        audit(admin.id, 'certificate_issued', 'domain', id, hostname)
       } catch (error) {
-        const detail = `${hostname}: ${error instanceof Error ? error.message : '证书签发失败'}`
-        audit(admin.id, 'certificate_failed', 'domain', id, detail)
-        notifyAlert({ type: 'certificate_failed', title: 'HTTPS 证书启用失败', detail, entityId: id })
+        certificateStatus = 'error'
       }
     }
     db.prepare("UPDATE domains SET dns_status = 'verified', certificate_status = ?, last_verified_at = ?, status = CASE WHEN status = 'pending' THEN 'active' ELSE status END, updated_at = ? WHERE id = ?")
@@ -861,10 +1212,8 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const row = db.prepare("SELECT hostname, dns_status FROM domains WHERE id = ?").get(id) as Row | undefined
     if (!row) throw new HttpError(404, '域名不存在')
     if (String(row.dns_status) !== 'verified') throw new HttpError(409, '请先完成 DNS 所有权验证')
-    const result = await issueCertificate(String(row.hostname))
-    db.prepare("UPDATE domains SET certificate_status = 'active', updated_at = ? WHERE id = ?").run(new Date().toISOString(), id)
-    audit(admin.id, 'certificate_issued', 'domain', id, String(row.hostname))
-    sendJson(response, 200, { domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(id) as Row), certificate: result })
+    const task = createTask({ kind: 'certificate_issue', label: `签发 ${String(row.hostname)} 的 HTTPS 证书`, entityType: 'domain', entityId: id, input: { domainId: id }, retryable: true })
+    sendJson(response, 200, await runCertificateOperationTask(task.id, admin.id))
     return
   }
 
@@ -950,6 +1299,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     if (!name) throw new HttpError(400, '软件名称不能为空')
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) throw new HttpError(400, '软件标识只能使用小写字母、数字和连字符')
     const status = ['published', 'draft', 'testing'].includes(String(body.status)) ? String(body.status) : 'draft'
+    if (status === 'published') throw new HttpError(409, '请先创建软件草稿、发布版本并上传安装包，再上架软件')
     const id = randomUUID()
     const timestamp = new Date().toISOString()
     const accent = name.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'AP'
@@ -982,6 +1332,12 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const name = String(body.name ?? current.name).trim()
     if (!name) throw new HttpError(400, '软件名称不能为空')
     const status = parseStatus(body.status ?? current.status, ['published', 'draft', 'testing'], String(current.status))
+    if (status === 'published') {
+      const deliverableCount = Number((db.prepare(`SELECT COUNT(*) AS count FROM packages
+        JOIN software_versions ON software_versions.id = packages.version_id
+        WHERE packages.software_id = ? AND packages.status = 'available' AND software_versions.status = 'published'`).get(id) as Row).count)
+      if (!deliverableCount) throw new HttpError(409, '上架软件前需要至少一个已发布版本及可用安装包')
+    }
     const timestamp = new Date().toISOString()
     db.prepare(`UPDATE software SET name = ?, description = ?, architecture = ?, status = ?, updated_at = ? WHERE id = ?`)
       .run(name, String(body.description ?? current.description), String(body.architecture ?? current.architecture), status, timestamp, id)
@@ -1001,12 +1357,71 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     return
   }
 
+  if (method === 'GET' && url.pathname === '/api/packages/resumable-sessions') {
+    const sessions = (db.prepare("SELECT * FROM upload_sessions WHERE status IN ('uploading', 'paused', 'failed') ORDER BY updated_at DESC").all() as Row[]).map((session) => {
+      const receivedChunks = JSON.parse(String(session.received_chunks || '[]')) as number[]
+      return {
+        id: String(session.id), fileName: String(session.file_name), softwareId: String(session.software_id || ''), version: String(session.version), platform: String(session.platform),
+        totalBytes: Number(session.total_bytes), chunkSize: Number(session.chunk_size), totalChunks: Number(session.total_chunks), receivedChunks,
+        progress: Number(session.total_chunks) ? Math.round(receivedChunks.length / Number(session.total_chunks) * 100) : 0,
+        status: String(session.status), updatedAt: String(session.updated_at), task: findLatestTask('package_upload', String(session.id)),
+      }
+    })
+    sendJson(response, 200, { sessions })
+    return
+  }
+  const resumableSessionMatch = url.pathname.match(/^\/api\/packages\/resumable\/([^/]+)$/)
+  if (resumableSessionMatch && method === 'GET') {
+    const uploadId = decodeURIComponent(resumableSessionMatch[1])
+    const session = db.prepare("SELECT * FROM upload_sessions WHERE id = ? AND status IN ('uploading', 'paused', 'failed')").get(uploadId) as Row | undefined
+    if (!session) throw new HttpError(404, '续传会话不存在')
+    const receivedChunks = JSON.parse(String(session.received_chunks || '[]')) as number[]
+    sendJson(response, 200, { session: { id: uploadId, fileName: String(session.file_name), totalBytes: Number(session.total_bytes), chunkSize: Number(session.chunk_size), totalChunks: Number(session.total_chunks), receivedChunks, status: String(session.status), progress: Math.round(receivedChunks.length / Number(session.total_chunks) * 100) } })
+    return
+  }
+  const resumablePauseMatch = url.pathname.match(/^\/api\/packages\/resumable\/([^/]+)\/pause$/)
+  if (resumablePauseMatch && method === 'POST') {
+    const uploadId = decodeURIComponent(resumablePauseMatch[1])
+    const session = db.prepare("SELECT id FROM upload_sessions WHERE id = ? AND status = 'uploading'").get(uploadId)
+    if (!session) throw new HttpError(409, '上传会话当前不能暂停')
+    db.prepare("UPDATE upload_sessions SET status = 'paused', updated_at = ? WHERE id = ?").run(new Date().toISOString(), uploadId)
+    const task = findLatestTask('package_upload', uploadId)
+    if (task) updateTask(task.id, { status: 'cancelled', message: '上传已暂停，可重新选择同一文件继续', log: { level: 'info', message: '管理员暂停上传会话' } })
+    sendJson(response, 200, { ok: true })
+    return
+  }
+  const resumableResumeMatch = url.pathname.match(/^\/api\/packages\/resumable\/([^/]+)\/resume$/)
+  if (resumableResumeMatch && method === 'POST') {
+    const uploadId = decodeURIComponent(resumableResumeMatch[1])
+    const session = db.prepare("SELECT * FROM upload_sessions WHERE id = ? AND status IN ('paused', 'failed', 'uploading')").get(uploadId) as Row | undefined
+    if (!session) throw new HttpError(404, '上传会话不存在或已经完成')
+    db.prepare("UPDATE upload_sessions SET status = 'uploading', updated_at = ? WHERE id = ?").run(new Date().toISOString(), uploadId)
+    const receivedChunks = JSON.parse(String(session.received_chunks || '[]')) as number[]
+    const task = createTask({ kind: 'package_upload', label: `续传安装包 ${String(session.file_name)}`, entityType: 'package', entityId: uploadId, input: { uploadId }, retryable: true })
+    updateTask(task.id, { status: 'running', progress: Math.round(receivedChunks.length / Number(session.total_chunks) * 90), message: '等待剩余文件分片', log: { level: 'info', message: `恢复续传，已有 ${receivedChunks.length}/${Number(session.total_chunks)} 个分片` } })
+    sendJson(response, 200, { uploadId, taskId: task.id, chunkSize: Number(session.chunk_size), totalChunks: Number(session.total_chunks), receivedChunks })
+    return
+  }
+  if (resumableSessionMatch && method === 'DELETE') {
+    const uploadId = decodeURIComponent(resumableSessionMatch[1])
+    const session = db.prepare("SELECT id FROM upload_sessions WHERE id = ? AND status <> 'completed'").get(uploadId)
+    if (!session) throw new HttpError(404, '上传会话不存在或已经完成')
+    rmSync(resolve(config.tempDir, 'uploads', uploadId), { recursive: true, force: true })
+    db.prepare('DELETE FROM upload_sessions WHERE id = ?').run(uploadId)
+    const task = findLatestTask('package_upload', uploadId)
+    if (task && ['queued', 'running'].includes(task.status)) cancelTask(task.id)
+    audit(admin.id, 'delete', 'upload_session', uploadId, '清理未完成的大文件上传')
+    sendJson(response, 200, { ok: true })
+    return
+  }
+
   if (method === 'POST' && url.pathname === '/api/packages/resumable-intent') {
     if (objectStorageMode !== 'local') throw new HttpError(409, '分片续传当前仅支持本地适配器，请使用对象存储直传流程')
     const body = await readJson<Record<string, unknown>>(request)
     const softwareId = String(body.softwareId || '')
     if (!db.prepare('SELECT id FROM software WHERE id = ?').get(softwareId)) throw new HttpError(404, '请选择有效的软件产品')
     const fileName = safeFileName(String(body.fileName || ''))
+    validatePackageMetadata(fileName, String(body.contentType || 'application/octet-stream'))
     const totalBytes = Number(body.totalBytes || 0)
     const version = String(body.version || '').trim()
     const platform = String(body.platform || '').trim()
@@ -1020,7 +1435,9 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     db.prepare(`INSERT INTO upload_sessions (id, object_key, file_name, software_id, version, platform, content_type, total_bytes, chunk_size, total_chunks, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, objectKey, fileName, softwareId, version, platform, String(body.contentType || 'application/octet-stream'), totalBytes, chunkSize, totalChunks, timestamp, timestamp)
-    sendJson(response, 201, { uploadId: id, chunkSize, totalChunks, receivedChunks: [] })
+    const task = createTask({ kind: 'package_upload', label: `上传安装包 ${fileName}`, entityType: 'package', entityId: id, input: { uploadId: id, fileName, totalBytes }, retryable: true })
+    updateTask(task.id, { status: 'running', progress: 0, message: '等待文件分片', log: { level: 'info', message: `分片会话已创建，共 ${totalChunks} 个分片` } })
+    sendJson(response, 201, { uploadId: id, taskId: task.id, chunkSize, totalChunks, receivedChunks: [] })
     return
   }
   const resumableChunkMatch = url.pathname.match(/^\/api\/packages\/resumable\/([^/]+)\/chunks\/(\d+)$/)
@@ -1037,6 +1454,8 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     if (!received.includes(index)) received.push(index)
     received.sort((a, b) => a - b)
     db.prepare('UPDATE upload_sessions SET received_chunks = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(received), new Date().toISOString(), uploadId)
+    const task = findLatestTask('package_upload', uploadId)
+    if (task) updateTask(task.id, { status: 'running', progress: Math.min(90, Math.round(received.length / Number(session.total_chunks) * 90)), message: `已接收 ${received.length}/${Number(session.total_chunks)} 个分片` })
     sendJson(response, 200, { uploadId, receivedChunks: received, complete: received.length === Number(session.total_chunks) })
     return
   }
@@ -1057,12 +1476,19 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
       rmSync(chunkPath, { force: true })
     }
     const completed = await completeStorageUpload(String(session.object_key), String(session.content_type))
+    try { validatePackageFile(objectPath, String(session.file_name)) } catch (error) {
+      rmSync(objectPath, { force: true })
+      db.prepare("UPDATE upload_sessions SET status = 'failed', updated_at = ? WHERE id = ?").run(new Date().toISOString(), uploadId)
+      throw error
+    }
     const timestamp = new Date().toISOString()
     const versionId = ensureSoftwareVersion(String(session.software_id), String(session.version))
     db.prepare(`INSERT INTO packages (id, file_name, software_id, version_id, version, platform, size, storage, object_key, byte_size, sha256, mime_type, downloads, status, updated_at, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'Local object storage', ?, ?, ?, ?, 0, 'available', ?, ?)`)
       .run(uploadId, String(session.file_name), String(session.software_id), versionId, String(session.version), String(session.platform), formatBytes(completed.byteSize), String(session.object_key), completed.byteSize, completed.sha256, String(session.content_type), timestamp, timestamp)
     db.prepare("UPDATE upload_sessions SET status = 'completed', updated_at = ? WHERE id = ?").run(timestamp, uploadId)
+    const task = findLatestTask('package_upload', uploadId)
+    if (task) updateTask(task.id, { status: 'succeeded', progress: 100, message: '安装包上传与校验完成', result: { packageId: uploadId, sha256: completed.sha256, byteSize: completed.byteSize }, log: { level: 'success', message: `合并与 SHA-256 校验完成：${completed.sha256}` } })
     audit(admin.id, 'upload', 'package', uploadId, `${String(session.file_name)} / resumable / SHA-256 ${completed.sha256}`)
     sendJson(response, 200, { package: packagesWithUrls().find((item) => item.id === uploadId) })
     return
@@ -1074,9 +1500,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const software = db.prepare('SELECT id, name FROM software WHERE id = ?').get(softwareId) as Row | undefined
     if (!software) throw new HttpError(404, '请选择有效的软件产品')
     const fileName = safeFileName(String(body.fileName || ''))
-    const extension = extname(fileName).toLowerCase()
-    const allowedExtensions = new Set(['.exe', '.msi', '.dmg', '.pkg', '.apk', '.zip', '.deb', '.rpm', '.appimage', '.tar', '.gz'])
-    if (!allowedExtensions.has(extension)) throw new HttpError(400, '不支持该安装包格式')
+    validatePackageMetadata(fileName, String(body.contentType || 'application/octet-stream'))
     const version = String(body.version || '').trim()
     const platform = String(body.platform || '').trim()
     const byteSize = Number(body.byteSize || 0)
@@ -1095,7 +1519,9 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
       .run(id, fileName, softwareId, versionId, version, platform, objectStorageMode === 's3' ? 'S3-compatible object storage' : 'Local object storage', objectKey, byteSize, sha256, contentType, timestamp, timestamp)
     const upload = createStorageUpload(objectKey, contentType, sha256)
     if (objectStorageMode === 'local') upload.url = `/api/packages/${encodeURIComponent(id)}/upload`
-    sendJson(response, 201, { packageId: id, upload, objectKey, maxBytes: config.maxPackageBytes })
+    const task = createTask({ kind: 'package_upload', label: `上传安装包 ${fileName}`, entityType: 'package', entityId: id, input: { packageId: id, fileName, byteSize }, retryable: false })
+    updateTask(task.id, { status: 'running', progress: 5, message: '等待浏览器直传文件', log: { level: 'info', message: `上传目标已准备：${objectStorageMode}` } })
+    sendJson(response, 201, { packageId: id, taskId: task.id, upload, objectKey, maxBytes: config.maxPackageBytes })
     return
   }
   if (method === 'POST' && url.pathname === '/api/packages/multipart-intent') {
@@ -1105,6 +1531,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const software = db.prepare('SELECT id FROM software WHERE id = ?').get(softwareId) as Row | undefined
     if (!software) throw new HttpError(404, '请选择有效的软件产品')
     const fileName = safeFileName(String(body.fileName || ''))
+    validatePackageMetadata(fileName, String(body.contentType || 'application/octet-stream'))
     const totalBytes = Number(body.totalBytes || 0)
     const version = String(body.version || '').trim()
     const platform = String(body.platform || '').trim()
@@ -1121,7 +1548,10 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     db.prepare(`INSERT INTO packages (id, file_name, software_id, version_id, version, platform, size, storage, object_key, byte_size, sha256, mime_type, downloads, status, updated_at, created_at)
       VALUES (?, ?, ?, ?, ?, ?, '', 'S3-compatible object storage', ?, ?, ?, ?, 0, 'processing', ?, ?)`)
       .run(id, fileName, softwareId, versionId, version, platform, objectKey, totalBytes, sha256, String(body.contentType || 'application/octet-stream'), timestamp, timestamp)
-    sendJson(response, 201, { packageId: id, uploadId, partSize, totalParts: Math.ceil(totalBytes / partSize) })
+    const totalParts = Math.ceil(totalBytes / partSize)
+    const task = createTask({ kind: 'package_upload', label: `分片上传安装包 ${fileName}`, entityType: 'package', entityId: id, input: { packageId: id, fileName, totalBytes, totalParts }, retryable: false })
+    updateTask(task.id, { status: 'running', progress: 5, message: `等待 ${totalParts} 个云端分片`, log: { level: 'info', message: `S3 multipart 会话已经创建：${uploadId}` } })
+    sendJson(response, 201, { packageId: id, taskId: task.id, uploadId, partSize, totalParts })
     return
   }
   const multipartPartMatch = url.pathname.match(/^\/api\/packages\/([^/]+)\/multipart\/([^/]+)\/parts\/(\d+)$/)
@@ -1131,6 +1561,11 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const partNumber = Number(multipartPartMatch[3])
     const row = db.prepare("SELECT object_key, status FROM packages WHERE id = ? AND status = 'processing'").get(id) as Row | undefined
     if (!row) throw new HttpError(404, '分片上传任务不存在')
+    const task = findLatestTask('package_upload', id)
+    if (task) {
+      const totalParts = Number(task.input.totalParts || 1)
+      updateTask(task.id, { status: 'running', progress: Math.min(85, 5 + Math.round(partNumber / totalParts * 75)), message: `正在上传云端分片 ${partNumber}/${totalParts}` })
+    }
     sendJson(response, 200, { upload: createMultipartPartUpload(String(row.object_key), uploadId, partNumber) })
     return
   }
@@ -1149,6 +1584,8 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     if (!completed.sha256 || completed.sha256.toLowerCase() !== String(row.sha256).toLowerCase()) throw new HttpError(409, '对象存储 SHA-256 元数据校验失败')
     db.prepare("UPDATE packages SET size = ?, byte_size = ?, sha256 = ?, status = 'available', updated_at = ? WHERE id = ?")
       .run(formatBytes(completed.byteSize), completed.byteSize, completed.sha256, new Date().toISOString(), id)
+    const task = findLatestTask('package_upload', id)
+    if (task) updateTask(task.id, { status: 'succeeded', progress: 100, message: '安装包分片合并与校验完成', result: { packageId: id, sha256: completed.sha256, byteSize: completed.byteSize }, log: { level: 'success', message: `S3 multipart 合并完成：${completed.sha256}` } })
     audit(admin.id, 'upload', 'package', id, `${String(row.file_name)} / multipart / SHA-256 ${completed.sha256 || '未提供'}`)
     sendJson(response, 200, { package: packagesWithUrls().find((item) => item.id === id) })
     return
@@ -1160,13 +1597,9 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const row = db.prepare("SELECT * FROM packages WHERE id = ? AND status = 'processing'").get(id) as Row | undefined
     if (!row) throw new HttpError(404, '上传任务不存在或已经完成')
     await uploadLocal(request, String(row.object_key), config.maxPackageBytes)
-    const completed = await completeStorageUpload(String(row.object_key), String(row.mime_type))
-    if (completed.byteSize !== Number(row.byte_size)) throw new HttpError(409, '上传文件大小与上传声明不一致')
-    if (!completed.sha256 || completed.sha256.toLowerCase() !== String(row.sha256).toLowerCase()) throw new HttpError(409, '上传文件 SHA-256 校验失败')
-    db.prepare("UPDATE packages SET size = ?, byte_size = ?, sha256 = ?, status = 'available', updated_at = ? WHERE id = ?")
-      .run(formatBytes(completed.byteSize), completed.byteSize, completed.sha256, new Date().toISOString(), id)
-    audit(admin.id, 'upload', 'package', id, `${String(row.file_name)} / SHA-256 ${completed.sha256}`)
-    sendJson(response, 200, { package: packagesWithUrls().find((item) => item.id === id) })
+    const task = findLatestTask('package_upload', id)
+    if (task) updateTask(task.id, { status: 'running', progress: 88, message: '文件上传完成，等待服务端校验', log: { level: 'success', message: '本地对象存储已完整接收文件' } })
+    sendJson(response, 200, { uploaded: true })
     return
   }
   const packageCompleteMatch = url.pathname.match(/^\/api\/packages\/([^/]+)\/complete$/)
@@ -1178,8 +1611,17 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     if (completed.byteSize <= 0 || completed.byteSize > config.maxPackageBytes) throw new HttpError(400, '对象存储中的文件大小无效')
     if (completed.byteSize !== Number(row.byte_size)) throw new HttpError(409, '对象存储文件大小与上传声明不一致')
     if (!completed.sha256 || completed.sha256.toLowerCase() !== String(row.sha256).toLowerCase()) throw new HttpError(409, '对象存储 SHA-256 元数据校验失败')
+    if (objectStorageMode === 'local') {
+      try { validatePackageFile(localFilePath(String(row.object_key)), String(row.file_name)) } catch (error) {
+        await removeObject(String(row.object_key))
+        db.prepare("UPDATE packages SET status = 'paused', updated_at = ? WHERE id = ?").run(new Date().toISOString(), id)
+        throw error
+      }
+    }
     db.prepare("UPDATE packages SET size = ?, byte_size = ?, sha256 = ?, status = 'available', updated_at = ? WHERE id = ?")
       .run(formatBytes(completed.byteSize), completed.byteSize, completed.sha256, new Date().toISOString(), id)
+    const task = findLatestTask('package_upload', id)
+    if (task) updateTask(task.id, { status: 'succeeded', progress: 100, message: '安装包上传与校验完成', result: { packageId: id, sha256: completed.sha256, byteSize: completed.byteSize }, log: { level: 'success', message: `SHA-256 校验完成：${completed.sha256}` } })
     audit(admin.id, 'upload', 'package', id, `${String(row.file_name)} / SHA-256 ${completed.sha256 || '未提供'}`)
     sendJson(response, 200, { package: packagesWithUrls().find((item) => item.id === id) })
     return
@@ -1189,9 +1631,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const software = db.prepare('SELECT id, name FROM software WHERE id = ?').get(softwareId) as Row | undefined
     if (!software) throw new HttpError(404, '请选择有效的软件产品')
     const fileName = safeFileName(url.searchParams.get('fileName') || '')
-    const extension = extname(fileName).toLowerCase()
-    const allowedExtensions = new Set(['.exe', '.msi', '.dmg', '.pkg', '.apk', '.zip', '.deb', '.rpm', '.appimage', '.tar', '.gz'])
-    if (!allowedExtensions.has(extension)) throw new HttpError(400, '不支持该安装包格式')
+    validatePackageMetadata(fileName, String(request.headers['content-type'] || 'application/octet-stream'))
     const version = String(url.searchParams.get('version') || '').trim()
     const platform = String(url.searchParams.get('platform') || '').trim()
     if (!version || !platform) throw new HttpError(400, '版本号和平台不能为空')
@@ -1200,6 +1640,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const objectKey = `packages/${id}/${safeObjectName(fileName)}`
     const filePath = safeStoragePath(config.storageDir, objectKey)
     const upload = await writeRequestToFile(request, filePath, config.maxPackageBytes)
+    try { validatePackageFile(filePath, fileName) } catch (error) { removeStoredFile(objectKey); throw error }
     const timestamp = new Date().toISOString()
     const versionId = ensureSoftwareVersion(softwareId, version)
     try {
@@ -1220,12 +1661,16 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
   const packageMatch = url.pathname.match(/^\/api\/packages\/([^/]+)$/)
   if (packageMatch && method === 'PATCH') {
     const id = decodeURIComponent(packageMatch[1])
-    const row = db.prepare('SELECT file_name, status FROM packages WHERE id = ?').get(id) as Row | undefined
+    const row = db.prepare('SELECT file_name, status, platform, release_notes FROM packages WHERE id = ?').get(id) as Row | undefined
     if (!row) throw new HttpError(404, '安装包不存在')
     const body = await readJson<Record<string, unknown>>(request)
     const status = parseStatus(body.status, ['available', 'paused'], String(row.status))
-    db.prepare('UPDATE packages SET status = ?, updated_at = ? WHERE id = ?').run(status, new Date().toISOString(), id)
-    audit(admin.id, 'update', 'package', id, `${String(row.file_name)} / ${status}`)
+    const platform = String(body.platform ?? row.platform).trim().slice(0, 120)
+    const releaseNotes = String(body.releaseNotes ?? row.release_notes).trim().slice(0, 10000)
+    if (!platform) throw new HttpError(400, '平台信息不能为空')
+    db.prepare('UPDATE packages SET status = ?, platform = ?, release_notes = ?, updated_at = ? WHERE id = ?')
+      .run(status, platform, releaseNotes, new Date().toISOString(), id)
+    audit(admin.id, 'update', 'package', id, `${String(row.file_name)} / ${platform} / ${status}`)
     sendJson(response, 200, { package: packagesWithUrls().find((item) => item.id === id) })
     return
   }
@@ -1275,6 +1720,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const status = parseStatus(body.status ?? current.status, ['published', 'draft', 'offline'], String(current.status))
     const name = String(body.name ?? current.name).trim()
     if (!name) throw new HttpError(400, '网站名称不能为空')
+    if (status === 'published' && !current.current_version_id) throw new HttpError(409, '网站尚无可发布版本，请先上传网站 ZIP')
     const timestamp = new Date().toISOString()
     db.prepare('UPDATE sites SET name = ?, domain = ?, category = ?, status = ?, updated_at = ? WHERE id = ?')
       .run(name, String(body.domain ?? current.domain), String(body.category ?? current.category), status, timestamp, id)
@@ -1289,33 +1735,21 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     if (!site) throw new HttpError(404, '静态网站不存在')
     const sourceName = safeFileName(url.searchParams.get('fileName') || 'website.zip')
     if (extname(sourceName).toLowerCase() !== '.zip') throw new HttpError(400, '静态网站必须上传 ZIP 文件')
-    const versionId = randomUUID()
-    const zipPath = resolve(config.tempDir, `${versionId}.zip`)
-    const releasePath = resolve(config.siteReleasesDir, siteId, versionId)
-    const upload = await writeRequestToFile(request, zipPath, config.maxSiteZipBytes)
+    mkdirSync(config.taskArtifactsDir, { recursive: true })
+    const taskId = randomUUID()
+    const zipPath = resolve(config.taskArtifactsDir, `${taskId}.zip`)
+    const task = createTask({ kind: 'site_publish', label: `发布静态网站 ${String(site.name)}`, entityType: 'site', entityId: siteId, input: { siteId, sourceName, zipPath }, retryable: true })
+    updateTask(task.id, { status: 'running', progress: 5, message: '正在接收网站 ZIP', log: { level: 'info', message: `开始接收 ${sourceName}` } })
     try {
-      const result = await extractStaticSite(zipPath, releasePath)
-      const timestamp = new Date().toISOString()
-      db.exec('BEGIN IMMEDIATE')
-      try {
-        db.prepare(`INSERT INTO site_versions (id, site_id, release_path, source_name, file_count, byte_size, sha256, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-          .run(versionId, siteId, releasePath, sourceName, result.files, result.totalBytes, upload.sha256, timestamp)
-        db.prepare("UPDATE sites SET current_version_id = ?, status = 'published', updated_at = ? WHERE id = ?")
-          .run(versionId, timestamp, siteId)
-        db.exec('COMMIT')
-      } catch (error) {
-        db.exec('ROLLBACK')
-        throw error
-      }
-      audit(admin.id, 'publish', 'site', siteId, `${sourceName} / ${result.files} files / SHA-256 ${upload.sha256}`)
+      const upload = await writeRequestToFile(request, zipPath, config.maxSiteZipBytes)
+      updateTask(task.id, { progress: 25, message: '上传完成，正在校验 ZIP', log: { level: 'success', message: `上传完成：${formatBytes(upload.bytes)}，SHA-256 ${upload.sha256}` } })
     } catch (error) {
-      rmSync(releasePath, { recursive: true, force: true })
-      throw error
-    } finally {
+      const detail = error instanceof Error ? error.message : '网站 ZIP 上传失败'
+      updateTask(task.id, { status: 'failed', message: '网站 ZIP 上传失败', error: detail, log: { level: 'error', message: detail } })
       rmSync(zipPath, { force: true })
+      throw error
     }
-    sendJson(response, 200, { site: mapSite(db.prepare('SELECT * FROM sites WHERE id = ?').get(siteId) as Row) })
+    sendJson(response, 200, await publishSiteTask(task.id, admin.id))
     return
   }
   const siteVersionsMatch = url.pathname.match(/^\/api\/sites\/([^/]+)\/versions$/)
@@ -1331,12 +1765,10 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const siteId = decodeURIComponent(siteRollbackMatch[1])
     const body = await readJson<{ versionId?: string }>(request)
     const versionId = String(body.versionId || '')
-    const version = db.prepare('SELECT id FROM site_versions WHERE id = ? AND site_id = ?').get(versionId, siteId)
-    if (!version) throw new HttpError(404, '发布版本不存在')
-    db.prepare("UPDATE sites SET current_version_id = ?, status = 'published', updated_at = ? WHERE id = ?")
-      .run(versionId, new Date().toISOString(), siteId)
-    audit(admin.id, 'rollback', 'site', siteId, versionId)
-    sendJson(response, 200, { site: mapSite(db.prepare('SELECT * FROM sites WHERE id = ?').get(siteId) as Row) })
+    const site = db.prepare('SELECT name FROM sites WHERE id = ?').get(siteId) as Row | undefined
+    if (!site) throw new HttpError(404, '静态网站不存在')
+    const task = createTask({ kind: 'site_rollback', label: `回滚静态网站 ${String(site.name)}`, entityType: 'site', entityId: siteId, input: { siteId, versionId }, retryable: true })
+    sendJson(response, 200, await rollbackSiteTask(task.id, admin.id))
     return
   }
   const siteDeleteMatch = url.pathname.match(/^\/api\/sites\/([^/]+)$/)
@@ -1344,6 +1776,8 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const siteId = decodeURIComponent(siteDeleteMatch[1])
     const site = db.prepare('SELECT name FROM sites WHERE id = ?').get(siteId) as Row | undefined
     if (!site) throw new HttpError(404, '静态网站不存在')
+    const boundDomains = db.prepare("SELECT hostname FROM domains WHERE mode = 'site' AND target = ? ORDER BY hostname").all(siteId) as Row[]
+    if (boundDomains.length) throw new HttpError(409, `该网站仍绑定 ${boundDomains.length} 个域名（${boundDomains.map((item) => String(item.hostname)).join('、')}），请先解除域名绑定`)
     db.prepare('DELETE FROM sites WHERE id = ?').run(siteId)
     rmSync(resolve(config.siteReleasesDir, siteId), { recursive: true, force: true })
     audit(admin.id, 'delete', 'site', siteId, String(site.name))
@@ -1362,10 +1796,12 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     if (!name) throw new HttpError(400, '品牌名称不能为空')
     if (supportEmail && !/^\S+@\S+\.\S+$/.test(supportEmail)) throw new HttpError(400, '支持邮箱格式不正确')
     db.prepare(`UPDATE settings SET name = ?, tagline = ?, support_email = ?, footer_text = ?,
-      default_redirect_code = ?, auto_https = ?, traffic_alerts = ?, updated_at = ? WHERE id = 1`)
+      default_redirect_code = ?, auto_https = ?, traffic_alerts = ?, public_maintenance = ?,
+      maintenance_message = ?, updated_at = ? WHERE id = 1`)
       .run(name, String(body.tagline || ''), supportEmail, String(body.footerText || ''),
         Number(body.defaultRedirectCode) === 301 ? 301 : 302, body.autoHttps === false ? 0 : 1,
-        body.trafficAlerts === false ? 0 : 1, new Date().toISOString())
+        body.trafficAlerts === false ? 0 : 1, body.publicMaintenance === true ? 1 : 0,
+        String(body.maintenanceMessage || '').trim().slice(0, 500), new Date().toISOString())
     audit(admin.id, 'update', 'settings', '1', name)
     sendJson(response, 200, { settings: publicSettings() })
     return
@@ -1379,13 +1815,15 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const query = String(url.searchParams.get('q') || '').trim()
     const clauses: string[] = []
     const params: string[] = []
-    if (action) { clauses.push('action = ?'); params.push(action) }
-    if (entityType) { clauses.push('entity_type = ?'); params.push(entityType) }
-    if (query) { clauses.push('(action LIKE ? OR entity_type LIKE ? OR entity_id LIKE ? OR detail LIKE ?)'); params.push(`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`) }
+    if (action) { clauses.push('audit_logs.action = ?'); params.push(action) }
+    if (entityType) { clauses.push('audit_logs.entity_type = ?'); params.push(entityType) }
+    if (query) { clauses.push('(audit_logs.action LIKE ? OR audit_logs.entity_type LIKE ? OR audit_logs.entity_id LIKE ? OR audit_logs.detail LIKE ? OR admins.username LIKE ? OR admins.display_name LIKE ? OR audit_logs.request_id LIKE ?)'); params.push(`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`) }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-    const total = Number((db.prepare(`SELECT COUNT(*) AS count FROM audit_logs ${where}`).get(...params) as Row).count)
+    const total = Number((db.prepare(`SELECT COUNT(*) AS count FROM audit_logs LEFT JOIN admins ON admins.id = audit_logs.admin_id ${where}`).get(...params) as Row).count)
     const offset = (requestedPage - 1) * pageSize
-    const logs = db.prepare(`SELECT action, entity_type AS entityType, entity_id AS entityId, detail, created_at AS createdAt FROM audit_logs ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, pageSize, offset)
+    const logs = db.prepare(`SELECT audit_logs.action, audit_logs.entity_type AS entityType, audit_logs.entity_id AS entityId, audit_logs.detail,
+      audit_logs.request_id AS requestId, audit_logs.ip_address AS ipAddress, COALESCE(admins.display_name, admins.username, '系统') AS adminName,
+      audit_logs.created_at AS createdAt FROM audit_logs LEFT JOIN admins ON admins.id = audit_logs.admin_id ${where} ORDER BY audit_logs.created_at DESC LIMIT ? OFFSET ?`).all(...params, pageSize, offset)
     sendJson(response, 200, { logs, total, page: requestedPage, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)) })
     return
   }
@@ -1517,7 +1955,7 @@ function serveSiteRelease(response: ServerResponse, releasePath: string, request
 function trySitePreview(request: IncomingMessage, response: ServerResponse, url: URL) {
   const match = url.pathname.match(/^\/preview\/([^/]+)(\/.*)?$/)
   if (!match) return false
-  if (!getAdmin(request)) {
+  if (!getAuthenticatedAdmin(request)) {
     sendHtml(response, 401, maintenanceHtml(publicSettings().name, 'Preview').replace('稍作休息，很快回来。', '请先登录管理后台。'))
     return true
   }
@@ -1532,25 +1970,39 @@ function trySitePreview(request: IncomingMessage, response: ServerResponse, url:
 
 function serveFrontend(response: ServerResponse, pathname: string) {
   if (pathname === '/login') {
-    response.writeHead(308, { Location: '/admin/login' })
+    response.writeHead(308, { Location: `${activeAdminBasePath}/login` })
     response.end()
     return
   }
-  const adminRequest = pathname === '/admin' || pathname.startsWith('/admin/')
-  const distDir = adminRequest ? config.adminDistDir : config.publicDistDir
+  const disabledAdminRequest = [...disabledAdminBasePaths].some((path) => pathname === path || pathname.startsWith(`${path}/`))
+  if (disabledAdminRequest) {
+    sendHtml(response, 404, '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>404</title><body><h1>404</h1><p>页面不存在。</p></body></html>')
+    return
+  }
+  const adminAssetRequest = pathname === '/admin-assets' || pathname.startsWith('/admin-assets/')
+  const adminRequest = pathname === activeAdminBasePath || pathname.startsWith(`${activeAdminBasePath}/`)
+  const distDir = adminRequest || adminAssetRequest ? config.adminDistDir : config.publicDistDir
   if (!existsSync(distDir)) throw new HttpError(404, `${adminRequest ? '管理端' : '公开端'}尚未构建，请先运行 npm run build`)
-  const requestPath = adminRequest ? pathname.slice('/admin'.length) || '/' : pathname
+  const requestPath = adminAssetRequest ? pathname.slice('/admin-assets'.length) || '/' : adminRequest ? pathname.slice(activeAdminBasePath.length) || '/' : pathname
   const candidate = resolve(distDir, `.${decodeURIComponent(requestPath)}`)
   const safe = candidate === distDir || candidate.startsWith(`${distDir}${sep}`)
+  if (adminAssetRequest && (!safe || !existsSync(candidate) || !statSync(candidate).isFile())) throw new HttpError(404, '管理端静态资源不存在')
   let filePath = safe && existsSync(candidate) && statSync(candidate).isFile() ? candidate : resolve(distDir, 'index.html')
   if (!existsSync(filePath)) filePath = resolve(distDir, 'index.html')
+  if (adminRequest && extname(filePath) === '.html') {
+    const html = readFileSync(filePath, 'utf8').replaceAll('__JTWZ_ADMIN_BASE_PATH__', activeAdminBasePath)
+    response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(html), 'Cache-Control': 'no-cache', 'X-Robots-Tag': 'noindex, nofollow, noarchive' })
+    response.end(html)
+    return
+  }
   response.writeHead(200, { 'Content-Type': mimeTypes[extname(filePath)] || 'application/octet-stream', 'Cache-Control': extname(filePath) === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable' })
   createReadStream(filePath).pipe(response)
 }
 
 const server = createServer(async (request: AuthenticatedRequest, response) => {
-  securityHeaders(request, response)
-  try {
+  applySecurityHeaders(request, response)
+  await runWithRequestContext(request, response, async () => {
+    try {
     const url = new URL(request.url || '/', `http://${request.headers.host || config.appHost}`)
     if (request.method === 'OPTIONS' && url.pathname.startsWith('/api/')) {
       const origin = request.headers.origin
@@ -1566,18 +2018,21 @@ const server = createServer(async (request: AuthenticatedRequest, response) => {
     if (trySitePreview(request, response, url)) return
     if (tryDomainRuntime(request, response, url)) return
     serveFrontend(response, url.pathname)
-  } catch (error) {
-    const status = error instanceof HttpError ? error.status : 500
-    const message = error instanceof HttpError ? error.message : '服务器内部错误'
-    if (status === 500) console.error(error)
-    if (!response.headersSent) sendJson(response, status, { error: message })
-    else response.end()
-  }
+    } catch (error) {
+      const status = error instanceof HttpError ? error.status : 500
+      const message = error instanceof HttpError ? error.message : '服务器内部错误'
+      if (status === 500) console.error(error)
+      if (!response.headersSent) sendJson(response, status, { error: message })
+      else response.end()
+    }
+  })
 })
 
 server.listen(config.port, config.host, () => {
   console.log(`[API] http://${config.host}:${config.port}`)
   console.log(`[DB] ${config.dbPath}`)
+  recoverInterruptedTasks()
   startBackupScheduler()
+  startCertificateRenewalScheduler()
 })
 

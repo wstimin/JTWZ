@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, verify as verifySignature } from 'node:crypto'
 import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rename } from 'node:fs/promises'
 import { basename, resolve, sep } from 'node:path'
@@ -14,6 +14,8 @@ type UpdateManifest = {
   notes?: string
   downloadUrl: string
   sha256: string
+  signature: string
+  signatureAlgorithm: 'ed25519'
 }
 
 const updateDir = resolve(config.dataDir, 'updates')
@@ -39,18 +41,34 @@ function isNewer(candidate: string, current: string) {
   return next.prerelease.localeCompare(installed.prerelease, undefined, { numeric: true }) > 0
 }
 
+function signaturePayload(manifest: Pick<UpdateManifest, 'version' | 'publishedAt' | 'notes' | 'downloadUrl' | 'sha256'>) {
+  return [manifest.version, manifest.publishedAt || '', manifest.notes || '', manifest.downloadUrl, manifest.sha256.toLowerCase()].join('\n')
+}
+
 function validateManifest(value: unknown): UpdateManifest {
   const manifest = value as Partial<UpdateManifest>
   if (!manifest || !parseVersion(String(manifest.version || ''))) throw new Error('更新清单的版本号无效')
   if (!/^https:\/\//i.test(String(manifest.downloadUrl || ''))) throw new Error('更新包地址必须使用 HTTPS')
   if (!/^[a-f0-9]{64}$/i.test(String(manifest.sha256 || ''))) throw new Error('更新包 SHA-256 无效')
-  return {
+  if (String(manifest.signatureAlgorithm || '').toLowerCase() !== 'ed25519') throw new Error('更新清单必须使用 Ed25519 签名')
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(String(manifest.signature || ''))) throw new Error('更新清单签名格式无效')
+  const validated: UpdateManifest = {
     version: String(manifest.version),
     publishedAt: manifest.publishedAt ? String(manifest.publishedAt) : undefined,
     notes: String(manifest.notes || '').slice(0, 20_000),
     downloadUrl: String(manifest.downloadUrl),
     sha256: String(manifest.sha256).toLowerCase(),
+    signature: String(manifest.signature),
+    signatureAlgorithm: 'ed25519',
   }
+  let signatureValid = false
+  try {
+    signatureValid = verifySignature(null, Buffer.from(signaturePayload(validated), 'utf8'), config.updatePublicKey, Buffer.from(validated.signature, 'base64'))
+  } catch {
+    throw new Error('更新签名公钥无效')
+  }
+  if (!signatureValid) throw new Error('更新清单签名验证失败，已拒绝下载')
+  return validated
 }
 
 function readState() {
@@ -59,11 +77,15 @@ function readState() {
 }
 
 export async function checkForUpdate() {
-  if (!config.updateManifestUrl) {
-    return { configured: false, currentVersion: config.systemVersion, updateAvailable: false, applyConfigured: Boolean(config.updateApplyCommand), state: readState() }
+  if (!config.updateManifestUrl || !config.updatePublicKey) {
+    return {
+      configured: false, currentVersion: config.systemVersion, updateAvailable: false, applyConfigured: Boolean(config.updateApplyCommand),
+      signatureConfigured: Boolean(config.updatePublicKey),
+      configurationError: !config.updateManifestUrl ? '尚未配置更新清单地址' : '尚未配置 Ed25519 更新签名公钥', state: readState(),
+    }
   }
   if (!/^https:\/\//i.test(config.updateManifestUrl)) throw new Error('更新清单地址必须使用 HTTPS')
-  const response = await fetch(config.updateManifestUrl, { headers: { Accept: 'application/json', 'User-Agent': `Aurelia/${config.systemVersion}` }, signal: AbortSignal.timeout(15_000) })
+  const response = await fetch(config.updateManifestUrl, { headers: { Accept: 'application/json', 'User-Agent': `JTWZ/${config.systemVersion}` }, signal: AbortSignal.timeout(15_000) })
   if (!response.ok) throw new Error(`更新清单请求失败（${response.status}）`)
   const manifest = validateManifest(await response.json())
   const status = {
@@ -72,6 +94,8 @@ export async function checkForUpdate() {
     latestVersion: manifest.version,
     updateAvailable: isNewer(manifest.version, config.systemVersion),
     applyConfigured: Boolean(config.updateApplyCommand),
+    signatureConfigured: true,
+    signatureVerified: true,
     manifest,
     checkedAt: new Date().toISOString(),
     state: readState(),
@@ -85,7 +109,7 @@ async function downloadUpdate(manifest: UpdateManifest) {
   if (!response.ok || !response.body) throw new Error(`更新包下载失败（${response.status}）`)
   const declaredSize = Number(response.headers.get('content-length') || 0)
   if (declaredSize > config.maxUpdateBytes) throw new Error('更新包超过允许大小')
-  const safeName = basename(new URL(manifest.downloadUrl).pathname).replace(/[^a-zA-Z0-9._-]/g, '_') || `aurelia-${manifest.version}.update`
+  const safeName = basename(new URL(manifest.downloadUrl).pathname).replace(/[^a-zA-Z0-9._-]/g, '_') || `jtwz-${manifest.version}.update`
   const destination = resolve(updateDir, `${manifest.version}-${safeName}`)
   if (!destination.startsWith(`${updateDir}${sep}`)) throw new Error('更新包路径无效')
   const temporary = `${destination}.tmp`
@@ -129,10 +153,18 @@ export async function installUpdate() {
   if (!status.updateAvailable) throw new Error('当前已经是最新版本')
   const rollbackBackup = await createBackup()
   const artifact = await downloadUpdate(status.manifest)
-  const staged = { status: 'staged', version: status.manifest.version, stagedAt: new Date().toISOString(), artifact, rollbackBackup }
+  const staged = { status: 'staged', version: status.manifest.version, stagedAt: new Date().toISOString(), artifact, manifest: status.manifest, rollbackBackup }
   writeFileSync(statePath, JSON.stringify(staged, null, 2), 'utf8')
   if (!config.updateApplyCommand) return { ...staged, applyStarted: false, message: '更新包已校验并暂存；配置安全更新执行器后可自动切换版本。' }
   const child = spawn(config.updateApplyCommand, [...configuredApplyArgs(), artifact.path], { windowsHide: true, detached: true, stdio: 'ignore' })
+  await new Promise<void>((resolvePromise, reject) => {
+    child.once('spawn', resolvePromise)
+    child.once('error', reject)
+  }).catch((error) => {
+    const failed = { ...staged, status: 'executor_failed', failedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) }
+    writeFileSync(statePath, JSON.stringify(failed, null, 2), 'utf8')
+    throw new Error(`安全更新执行器启动失败：${failed.error}`)
+  })
   child.unref()
   return { ...staged, applyStarted: true, message: '更新执行器已启动，服务将由进程管理器重启。' }
 }

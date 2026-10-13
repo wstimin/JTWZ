@@ -4,6 +4,7 @@ import type { SoftwareRecord, SoftwareVersionRecord } from '../../types'
 import { apiJson, apiRequest } from '../../lib/api'
 import { Modal } from '../../components/Modal'
 import { useToast } from '../../contexts/ToastContext'
+import { useAuth } from '../../contexts/AuthContext'
 
 type VersionDraft = {
   softwareId: string
@@ -27,6 +28,8 @@ export function VersionsPage({ software }: { software: SoftwareRecord[] }) {
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const { notify } = useToast()
+  const { admin } = useAuth()
+  const canManage = Boolean(admin?.permissions.includes('content.manage'))
 
   async function load() {
     try {
@@ -40,6 +43,7 @@ export function VersionsPage({ software }: { software: SoftwareRecord[] }) {
   useEffect(() => { void load() }, [softwareId])
 
   const filtered = useMemo(() => versions.filter((item) => `${item.software} ${item.version} ${item.channel} ${item.platforms.join(' ')}`.toLowerCase().includes(query.toLowerCase())), [versions, query])
+  const editingVersion = versions.find((item) => item.id === editingId)
 
   function openCreate() {
     setEditingId('')
@@ -109,9 +113,9 @@ export function VersionsPage({ software }: { software: SoftwareRecord[] }) {
     <section className="panel table-panel">
       <div className="toolbar">
         <div className="toolbar-copy"><span className="overline">Release management</span><h2>软件版本管理</h2><p>版本是独立发布记录，安装包按平台归属到对应版本。</p></div>
-        <div className="toolbar-actions"><label className="select-control"><select value={softwareId} onChange={(event) => setSoftwareId(event.target.value)}><option value="">全部软件</option>{software.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label className="search-control"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索版本、通道或平台…" /></label><button className="button button--primary" type="button" onClick={openCreate}><Plus /> 新建版本</button></div>
+        <div className="toolbar-actions"><label className="select-control"><select value={softwareId} onChange={(event) => setSoftwareId(event.target.value)}><option value="">全部软件</option>{software.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label className="search-control"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索版本、通道或平台…" /></label>{canManage ? <button className="button button--primary" type="button" onClick={openCreate}><Plus /> 新建版本</button> : null}</div>
       </div>
-      <div className="data-table-wrap"><table className="data-table"><thead><tr><th>软件 / 版本</th><th>通道</th><th>安装包</th><th>下载</th><th>状态</th><th>更新时间</th><th /></tr></thead><tbody>{filtered.map((item) => <tr key={item.id}><td><div className="table-stack"><strong>{item.software} · v{item.version}</strong><small>{item.isRecommended ? '推荐版本' : item.releaseNotes ? item.releaseNotes.slice(0, 44) : '暂无更新说明'}</small></div></td><td>{channelLabels[item.channel]}</td><td><div className="table-stack"><strong>{item.packageCount} 个</strong><small>{item.platforms.join(' / ') || '尚未上传'}</small></div></td><td>{item.downloads.toLocaleString()}</td><td><span className="content-status" data-status={item.status}>{statusLabels[item.status]}</span></td><td>{new Date(item.updatedAt).toLocaleDateString('zh-CN')}</td><td><div className="row-actions">{!item.isRecommended && item.status !== 'archived' ? <button aria-label="设为推荐版本" title="设为推荐版本" type="button" onClick={() => void markRecommended(item)}><Star /></button> : null}<button aria-label="编辑版本" title="编辑版本" type="button" onClick={() => openEdit(item)}><Edit3 /></button><button aria-label={item.status === 'archived' ? '恢复版本' : '归档版本'} title={item.status === 'archived' ? '恢复版本' : '归档版本'} type="button" onClick={() => void archiveVersion(item)}><Archive /></button><button className="danger-icon" aria-label="删除版本" title="删除版本" type="button" onClick={() => void removeVersion(item)}><Trash2 /></button></div></td></tr>)}</tbody></table></div>
+      <div className="data-table-wrap"><table className="data-table"><thead><tr><th>软件 / 版本</th><th>通道</th><th>安装包</th><th>下载</th><th>状态</th><th>更新时间</th>{canManage ? <th /> : null}</tr></thead><tbody>{filtered.map((item) => <tr key={item.id}><td><div className="table-stack"><strong>{item.software} · v{item.version}</strong><small>{item.isRecommended ? '推荐版本' : item.releaseNotes ? item.releaseNotes.slice(0, 44) : '暂无更新说明'}</small></div></td><td>{channelLabels[item.channel]}</td><td><div className="table-stack"><strong>{item.packageCount} 个</strong><small>{item.platforms.join(' / ') || '尚未上传'}</small></div></td><td>{item.downloads.toLocaleString()}</td><td><span className="content-status" data-status={item.status}>{statusLabels[item.status]}</span></td><td>{new Date(item.updatedAt).toLocaleDateString('zh-CN')}</td>{canManage ? <td><div className="row-actions">{!item.isRecommended && item.status !== 'archived' && item.packageCount > 0 ? <button aria-label="设为推荐版本" title="设为推荐版本" type="button" onClick={() => void markRecommended(item)}><Star /></button> : null}<button aria-label="编辑版本" title="编辑版本" type="button" onClick={() => openEdit(item)}><Edit3 /></button><button aria-label={item.status === 'archived' ? '恢复版本' : '归档版本'} title={item.status === 'archived' ? '恢复版本' : '归档版本'} type="button" onClick={() => void archiveVersion(item)}><Archive /></button><button className="danger-icon" aria-label="删除版本" title="删除版本" type="button" onClick={() => void removeVersion(item)}><Trash2 /></button></div></td> : null}</tr>)}</tbody></table></div>
       {!filtered.length ? <div className="table-empty"><PackageOpen /><strong>暂无版本记录</strong><span>先创建一个发布版本，再上传对应平台的安装包。</span></div> : null}
     </section>
 
@@ -120,7 +124,7 @@ export function VersionsPage({ software }: { software: SoftwareRecord[] }) {
         <label className="field"><span>所属软件</span><select value={draft.softwareId} disabled={Boolean(editingId)} onChange={(event) => setDraft({ ...draft, softwareId: event.target.value })} required><option value="">请选择软件</option>{software.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <div className="field-grid"><label className="field"><span>版本号</span><input value={draft.version} onChange={(event) => setDraft({ ...draft, version: event.target.value })} placeholder="例如 2.5.0" required /></label><label className="field"><span>发布通道</span><select value={draft.channel} onChange={(event) => setDraft({ ...draft, channel: event.target.value as SoftwareVersionRecord['channel'] })}><option value="stable">正式版</option><option value="beta">Beta</option><option value="alpha">Alpha</option></select></label></div>
         <label className="field"><span>更新说明</span><textarea rows={6} value={draft.releaseNotes} onChange={(event) => setDraft({ ...draft, releaseNotes: event.target.value })} placeholder="记录本次新增、改进和修复内容…" /></label>
-        <div className="field-grid"><label className="field"><span>发布状态</span><select value={draft.status} onChange={(event) => setDraft({ ...draft, status: event.target.value as SoftwareVersionRecord['status'] })}><option value="draft">草稿</option><option value="published">已发布</option><option value="archived">已归档</option></select></label><label className="toggle-row"><input type="checkbox" checked={draft.isRecommended} onChange={(event) => setDraft({ ...draft, isRecommended: event.target.checked })} /><span><strong>设为推荐版本</strong><small>推荐版本会自动发布，并显示在软件首页。</small></span></label></div>
+        <div className="field-grid"><label className="field"><span>发布状态</span><select value={draft.status} onChange={(event) => setDraft({ ...draft, status: event.target.value as SoftwareVersionRecord['status'] })}><option value="draft">草稿</option><option value="published" disabled={!editingId || !editingVersion?.packageCount}>已发布</option><option value="archived">已归档</option></select><small>{editingVersion?.packageCount ? '当前版本已具备安装包，可以正式发布。' : '上传至少一个可用安装包后才能发布。'}</small></label><label className="toggle-row"><input type="checkbox" checked={draft.isRecommended} disabled={!editingId || !editingVersion?.packageCount} onChange={(event) => setDraft({ ...draft, isRecommended: event.target.checked })} /><span><strong>设为推荐版本</strong><small>推荐版本会自动发布，并显示在软件首页。</small></span></label></div>
       </form>
     </Modal>
   </div>

@@ -1,4 +1,6 @@
 import {
+  AlertTriangle,
+  CalendarClock,
   Check,
   ChevronDown,
   Copy,
@@ -9,16 +11,18 @@ import {
   PauseCircle,
   PlayCircle,
   Plus,
+  RefreshCw,
   Search,
   ShieldCheck,
   Trash2,
 } from 'lucide-react'
 import { FormEvent, useMemo, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
-import type { DomainMode, DomainRecord, SiteRecord } from '../../types'
+import type { CertificateRecord, DomainMode, DomainRecord, SiteRecord } from '../../types'
 import { DomainModeBadge, DomainStatusBadge } from '../../components/StatusBadge'
 import { Modal } from '../../components/Modal'
 import { useToast } from '../../contexts/ToastContext'
+import { useAuth } from '../../contexts/AuthContext'
 import { apiJson, apiRequest } from '../../lib/api'
 
 interface DnsInstructions {
@@ -39,6 +43,12 @@ interface DomainsPageProps {
   sites: SiteRecord[]
 }
 
+interface CertificateFailure {
+  action: string
+  detail: string
+  createdAt: string
+}
+
 export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('all')
@@ -56,7 +66,18 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
   const [checkingDns, setCheckingDns] = useState(false)
   const [publishingDns, setPublishingDns] = useState(false)
   const [issuingCertificate, setIssuingCertificate] = useState(false)
+  const [certificates, setCertificates] = useState<CertificateRecord[]>([])
+  const [certificateFailures, setCertificateFailures] = useState<CertificateFailure[]>([])
+  const [showCertificateForm, setShowCertificateForm] = useState(false)
+  const [certificateIssuer, setCertificateIssuer] = useState('')
+  const [certificateSerial, setCertificateSerial] = useState('')
+  const [certificateIssuedAt, setCertificateIssuedAt] = useState('')
+  const [certificateExpiresAt, setCertificateExpiresAt] = useState('')
+  const [certificateNote, setCertificateNote] = useState('')
+  const [savingCertificate, setSavingCertificate] = useState(false)
   const { notify } = useToast()
+  const { admin } = useAuth()
+  const canManage = Boolean(admin?.permissions.includes('content.manage'))
   const publishedSites = sites.filter((site) => site.status === 'published')
 
   const filtered = useMemo(
@@ -153,12 +174,23 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
 
   async function openDns(domain: DomainRecord) {
     try {
-      const result = await apiRequest<{ instructions: DnsInstructions }>(`/api/domains/${encodeURIComponent(domain.id)}/dns-instructions`)
+      const [result, diagnostics] = await Promise.all([
+        apiRequest<{ instructions: DnsInstructions }>(`/api/domains/${encodeURIComponent(domain.id)}/dns-instructions`),
+        apiRequest<{ certificates: CertificateRecord[]; failures: CertificateFailure[] }>(`/api/domains/${encodeURIComponent(domain.id)}/certificate-diagnostics`),
+      ])
       setDnsDomain(domain)
       setDnsInstructions(result.instructions)
+      setCertificates(diagnostics.certificates)
+      setCertificateFailures(diagnostics.failures)
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : 'DNS 配置读取失败', 'info')
     }
+  }
+
+  async function reloadCertificates(domainId: string) {
+    const diagnostics = await apiRequest<{ certificates: CertificateRecord[]; failures: CertificateFailure[] }>(`/api/domains/${encodeURIComponent(domainId)}/certificate-diagnostics`)
+    setCertificates(diagnostics.certificates)
+    setCertificateFailures(diagnostics.failures)
   }
 
   async function verifyDns() {
@@ -194,15 +226,87 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
     if (!dnsDomain) return
     setIssuingCertificate(true)
     try {
-      const result = await apiJson<{ domain: DomainRecord }>(`/api/domains/${encodeURIComponent(dnsDomain.id)}/issue-certificate`, 'POST')
+      const result = await apiJson<{ domain: DomainRecord; certificate: CertificateRecord }>(`/api/domains/${encodeURIComponent(dnsDomain.id)}/issue-certificate`, 'POST')
       setDomains((current) => current.map((item) => item.id === result.domain.id ? result.domain : item))
       setDnsDomain(result.domain)
       setDnsInstructions((current) => current ? { ...current, certificateStatus: 'active' } : current)
+      await reloadCertificates(dnsDomain.id)
       notify('HTTPS 已启用，证书状态已更新')
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : 'HTTPS 证书签发失败', 'info')
     } finally {
       setIssuingCertificate(false)
+    }
+  }
+
+  async function saveExternalCertificate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!dnsDomain) return
+    setSavingCertificate(true)
+    try {
+      const result = await apiJson<{ certificate: CertificateRecord; domain: DomainRecord }>(`/api/domains/${encodeURIComponent(dnsDomain.id)}/certificates`, 'POST', {
+        issuer: certificateIssuer,
+        serialNumber: certificateSerial,
+        issuedAt: certificateIssuedAt || undefined,
+        expiresAt: certificateExpiresAt,
+        note: certificateNote,
+        autoRenew: false,
+      })
+      setCertificates((current) => [result.certificate, ...current])
+      setDomains((current) => current.map((item) => item.id === result.domain.id ? result.domain : item))
+      setDnsDomain(result.domain)
+      setDnsInstructions((current) => current ? { ...current, certificateStatus: result.domain.certificateStatus || 'pending' } : current)
+      setShowCertificateForm(false)
+      setCertificateIssuer('')
+      setCertificateSerial('')
+      setCertificateIssuedAt('')
+      setCertificateExpiresAt('')
+      setCertificateNote('')
+      notify('外部证书已经登记到生命周期记录')
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : '证书登记失败', 'info')
+    } finally {
+      setSavingCertificate(false)
+    }
+  }
+
+  async function updateCertificate(item: CertificateRecord, autoRenew: boolean) {
+    try {
+      const result = await apiJson<{ certificate: CertificateRecord; domain: DomainRecord }>(`/api/certificates/${encodeURIComponent(item.id)}`, 'PATCH', { autoRenew })
+      setCertificates((current) => current.map((entry) => entry.id === item.id ? result.certificate : entry))
+      notify(autoRenew ? '自动续期已开启' : '自动续期已关闭', 'info')
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : '证书设置更新失败', 'info')
+    }
+  }
+
+  async function renewCertificate(item: CertificateRecord) {
+    setIssuingCertificate(true)
+    try {
+      const result = await apiJson<{ certificate: CertificateRecord; domain: DomainRecord }>(`/api/certificates/${encodeURIComponent(item.id)}/renew`, 'POST')
+      setCertificates((current) => current.map((entry) => entry.id === item.id ? result.certificate : entry))
+      setDomains((current) => current.map((entry) => entry.id === result.domain.id ? result.domain : entry))
+      setDnsDomain(result.domain)
+      notify('证书续期完成')
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : '证书续期失败，诊断信息已记录', 'info')
+      if (dnsDomain) await reloadCertificates(dnsDomain.id).catch(() => undefined)
+    } finally {
+      setIssuingCertificate(false)
+    }
+  }
+
+  async function removeCertificate(item: CertificateRecord) {
+    if (!window.confirm(`确定删除 ${item.issuer || '当前'} 证书记录吗？Webhook 证书会同时通知服务商撤销。`)) return
+    try {
+      const result = await apiJson<{ domain: DomainRecord }>(`/api/certificates/${encodeURIComponent(item.id)}`, 'DELETE')
+      setCertificates((current) => current.filter((entry) => entry.id !== item.id))
+      setDomains((current) => current.map((entry) => entry.id === result.domain.id ? result.domain : entry))
+      setDnsDomain(result.domain)
+      setDnsInstructions((current) => current ? { ...current, certificateStatus: result.domain.certificateStatus || 'pending' } : current)
+      notify('证书记录已删除', 'info')
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : '证书删除失败', 'info')
     }
   }
 
@@ -221,7 +325,7 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
           <div className="toolbar-actions">
             <label className="search-control"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索域名或目标…" /></label>
             <label className="select-control"><Filter /><select value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">全部状态</option><option value="active">正常运行</option><option value="pending">等待配置</option><option value="paused">已暂停</option></select><ChevronDown /></label>
-            <button className="button button--primary" type="button" onClick={openCreate}><Plus /> 添加域名</button>
+            {canManage ? <button className="button button--primary" type="button" onClick={openCreate}><Plus /> 添加域名</button> : null}
           </div>
         </div>
 
@@ -237,7 +341,7 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
                   <td><DomainStatusBadge status={domain.status} /></td>
                   <td><strong>{domain.visits.toLocaleString()}</strong></td>
                   <td>{domain.certificateStatus === 'active' ? <span className="ssl-state"><ShieldCheck /> 已生效</span> : <span className="table-muted">{domain.dnsStatus === 'verified' ? '待签发' : '待验证'}</span>}</td>
-                  <td><div className="row-actions"><button aria-label="复制域名" title="复制域名" onClick={() => { navigator.clipboard?.writeText(domain.hostname); notify('域名已复制') }}><Copy /></button><button aria-label="编辑域名" title="编辑域名" onClick={() => openEdit(domain)}><Edit3 /></button><button aria-label="DNS 验证" title="DNS 验证" onClick={() => void openDns(domain)}><ShieldCheck /></button><button aria-label="打开目标" title="打开目标" onClick={() => { if (/^https?:\/\//.test(domain.target)) window.open(domain.target, '_blank', 'noopener,noreferrer') }}><ExternalLink /></button><button aria-label={domain.status === 'active' ? '暂停域名' : '启用域名'} title={domain.status === 'active' ? '暂停域名' : '启用域名'} onClick={() => void toggleDomain(domain)} disabled={domain.status !== 'active' && domain.dnsStatus !== 'verified'}>{domain.status === 'active' ? <PauseCircle /> : <PlayCircle />}</button><button className="danger-icon" aria-label="删除域名" title="删除域名" onClick={() => void removeDomain(domain.id)}><Trash2 /></button></div></td>
+                  <td><div className="row-actions"><button aria-label="复制域名" title="复制域名" onClick={() => { navigator.clipboard?.writeText(domain.hostname); notify('域名已复制') }}><Copy /></button>{canManage ? <button aria-label="编辑域名" title="编辑域名" onClick={() => openEdit(domain)}><Edit3 /></button> : null}<button aria-label="DNS 与 HTTPS 信息" title="DNS 与 HTTPS 信息" onClick={() => void openDns(domain)}><ShieldCheck /></button><button aria-label="打开目标" title="打开目标" onClick={() => { if (/^https?:\/\//.test(domain.target)) window.open(domain.target, '_blank', 'noopener,noreferrer') }}><ExternalLink /></button>{canManage ? <><button aria-label={domain.status === 'active' ? '暂停域名' : '启用域名'} title={domain.status === 'active' ? '暂停域名' : '启用域名'} onClick={() => void toggleDomain(domain)} disabled={domain.status !== 'active' && domain.dnsStatus !== 'verified'}>{domain.status === 'active' ? <PauseCircle /> : <PlayCircle />}</button><button className="danger-icon" aria-label="删除域名" title="删除域名" onClick={() => void removeDomain(domain.id)}><Trash2 /></button></> : null}</div></td>
                 </tr>
               ))}
             </tbody>
@@ -263,13 +367,32 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
         </form>
       </Modal>
 
-      <Modal open={Boolean(dnsDomain)} onClose={() => { setDnsDomain(null); setDnsInstructions(null) }} eyebrow="DNS ownership" title={`验证 ${dnsDomain?.hostname || ''}`} footer={<><button className="button button--secondary" type="button" onClick={() => { setDnsDomain(null); setDnsInstructions(null) }}>稍后验证</button><button className="button button--primary" type="button" onClick={() => void verifyDns()} disabled={checkingDns || dnsInstructions?.dnsStatus === 'verified'}><ShieldCheck /> {checkingDns ? '正在查询 DNS…' : dnsInstructions?.dnsStatus === 'verified' ? '已经验证' : '立即验证'}</button></>}>
+      <Modal open={Boolean(dnsDomain)} onClose={() => { setDnsDomain(null); setDnsInstructions(null); setShowCertificateForm(false) }} eyebrow="DNS & certificate lifecycle" title={`域名安全配置 · ${dnsDomain?.hostname || ''}`} footer={<><button className="button button--secondary" type="button" onClick={() => { setDnsDomain(null); setDnsInstructions(null); setShowCertificateForm(false) }}>关闭</button>{canManage ? <button className="button button--primary" type="button" onClick={() => void verifyDns()} disabled={checkingDns || dnsInstructions?.dnsStatus === 'verified'}><ShieldCheck /> {checkingDns ? '正在查询 DNS…' : dnsInstructions?.dnsStatus === 'verified' ? 'DNS 已验证' : '立即验证 DNS'}</button> : null}</>}>
         {dnsInstructions ? <div className="form-stack">
           <div className="form-note"><ShieldCheck /><div><strong>添加一条 TXT 记录</strong><span>{dnsInstructions.dnsProvider.configured ? '已接入 DNS 服务商，可自动写入；也可以手动添加以下记录。' : '请登录域名 DNS 服务商控制台，添加以下记录。生效后点击“立即验证”。'}</span></div></div>
-          {dnsInstructions.dnsProvider.configured ? <button className="button button--secondary" type="button" onClick={() => void publishDns()} disabled={publishingDns}><ShieldCheck /> {publishingDns ? '正在写入…' : `自动写入 ${dnsInstructions.dnsProvider.provider === 'cloudflare' ? 'Cloudflare' : 'DNS'}`}</button> : null}
-          {dnsInstructions.certificateStatus !== 'active' && dnsInstructions.certificateProvider.configured ? <button className="button button--secondary" type="button" onClick={() => void issueCertificate()} disabled={issuingCertificate || dnsInstructions.dnsStatus !== 'verified'}><ShieldCheck /> {issuingCertificate ? '正在启用 HTTPS…' : '启用 HTTPS'}</button> : null}
+          {canManage && dnsInstructions.dnsProvider.configured ? <button className="button button--secondary" type="button" onClick={() => void publishDns()} disabled={publishingDns}><ShieldCheck /> {publishingDns ? '正在写入…' : `自动写入 ${dnsInstructions.dnsProvider.provider === 'cloudflare' ? 'Cloudflare' : 'DNS'}`}</button> : null}
+          {canManage && dnsInstructions.certificateStatus !== 'active' && dnsInstructions.certificateProvider.configured ? <button className="button button--secondary" type="button" onClick={() => void issueCertificate()} disabled={issuingCertificate || dnsInstructions.dnsStatus !== 'verified'}><ShieldCheck /> {issuingCertificate ? '正在启用 HTTPS…' : '启用 HTTPS'}</button> : null}
           <div className="dns-record-grid"><div><span>记录类型</span><strong>{dnsInstructions.type}</strong></div><div><span>主机记录</span><strong>{dnsInstructions.name}</strong><button type="button" onClick={() => { void navigator.clipboard?.writeText(dnsInstructions.name); notify('主机记录已复制') }}><Copy /></button></div><div className="dns-record-value"><span>记录值</span><strong>{dnsInstructions.value}</strong><button type="button" onClick={() => { void navigator.clipboard?.writeText(dnsInstructions.value); notify('TXT 记录值已复制') }}><Copy /></button></div></div>
           <p className="dns-hint">完整查询名称：{dnsInstructions.fullName}<br />DNS 状态：{dnsInstructions.dnsStatus === 'verified' ? '已验证' : '等待验证'} · HTTPS：{dnsInstructions.certificateStatus === 'active' ? '已生效' : '等待签发'}</p>
+
+          <section className="certificate-lifecycle">
+            <div className="certificate-heading"><div><span className="overline">Certificate lifecycle</span><h3>HTTPS 证书</h3><p>集中查看有效期、续期策略和服务商失败记录。</p></div>{canManage ? <button className="button button--secondary" type="button" disabled={dnsInstructions.dnsStatus !== 'verified'} onClick={() => setShowCertificateForm((current) => !current)}><Plus /> 登记外部证书</button> : null}</div>
+            {showCertificateForm ? <form className="certificate-form" onSubmit={saveExternalCertificate}>
+              <div className="field-grid"><label className="field"><span>签发机构</span><input value={certificateIssuer} onChange={(event) => setCertificateIssuer(event.target.value)} placeholder="例如 Let's Encrypt" required /></label><label className="field"><span>序列号</span><input value={certificateSerial} onChange={(event) => setCertificateSerial(event.target.value)} placeholder="可选" /></label></div>
+              <div className="field-grid"><label className="field"><span>签发日期</span><input type="date" value={certificateIssuedAt} onChange={(event) => setCertificateIssuedAt(event.target.value)} /></label><label className="field"><span>到期日期</span><input type="date" value={certificateExpiresAt} onChange={(event) => setCertificateExpiresAt(event.target.value)} required /></label></div>
+              <label className="field"><span>备注</span><input value={certificateNote} onChange={(event) => setCertificateNote(event.target.value)} placeholder="证书文件位置、负责人或续期说明" /></label>
+              <div className="certificate-form-actions"><span>外部证书只登记生命周期元数据，不会上传私钥。</span><button className="button button--primary" type="submit" disabled={savingCertificate}><Check /> {savingCertificate ? '保存中…' : '保存证书记录'}</button></div>
+            </form> : null}
+            <div className="certificate-list">
+              {certificates.map((item) => <article className="certificate-card" key={item.id} data-status={item.status}>
+                <div className="certificate-icon">{item.status === 'error' || item.status === 'expired' ? <AlertTriangle /> : <ShieldCheck />}</div>
+                <div className="certificate-copy"><div><strong>{item.issuer || item.provider}</strong><span className="content-status" data-status={item.status === 'active' ? 'available' : item.status === 'error' || item.status === 'expired' ? 'paused' : 'processing'}>{item.status === 'active' ? '有效' : item.status === 'expiring' ? '即将到期' : item.status === 'expired' ? '已过期' : item.status === 'error' ? '失败' : '处理中'}</span></div><span>{item.provider} · {item.serialNumber || item.externalRef || '无外部编号'}</span><small><CalendarClock /> {item.expiresAt ? `${new Date(item.expiresAt).toLocaleDateString('zh-CN')} 到期${typeof item.expiresInDays === 'number' ? ` · 剩余 ${item.expiresInDays} 天` : ''}` : '由服务商自动管理有效期'}</small>{item.lastError ? <em><AlertTriangle /> {item.lastError}</em> : null}</div>
+                {canManage ? <div className="certificate-actions"><label title={item.provider === 'manual' ? '外部证书需要手动更新' : '自动续期'}><input type="checkbox" checked={item.autoRenew} disabled={item.provider === 'manual'} onChange={(event) => void updateCertificate(item, event.target.checked)} /><span>自动续期</span></label><button type="button" aria-label="续期证书" title="续期证书" disabled={issuingCertificate || !dnsInstructions.certificateProvider.configured} onClick={() => void renewCertificate(item)}><RefreshCw /></button><button className="danger-icon" type="button" aria-label="删除证书" title="删除证书" onClick={() => void removeCertificate(item)}><Trash2 /></button></div> : null}
+              </article>)}
+              {!certificates.length ? <div className="certificate-empty"><ShieldCheck /><div><strong>尚未登记证书</strong><span>{dnsInstructions.certificateProvider.configured ? '可由已接入的证书服务商签发，或登记现有外部证书。' : '当前未接入自动签发服务商，可以先登记现有外部证书。'}</span></div></div> : null}
+            </div>
+            {certificateFailures.length ? <details className="certificate-diagnostics"><summary><AlertTriangle /> 查看最近 {certificateFailures.length} 条失败诊断</summary>{certificateFailures.map((failure, index) => <div key={`${failure.createdAt}-${index}`}><strong>{new Date(failure.createdAt).toLocaleString('zh-CN')}</strong><span>{failure.detail}</span></div>)}</details> : null}
+          </section>
         </div> : null}
       </Modal>
     </div>

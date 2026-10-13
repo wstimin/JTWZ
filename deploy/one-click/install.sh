@@ -12,12 +12,23 @@ fi
 command -v curl >/dev/null || { printf '[JTWZ] 缺少 curl，无法下载安装包。\n' >&2; exit 1; }
 command -v tar >/dev/null || { printf '[JTWZ] 缺少 tar，无法解压安装包。\n' >&2; exit 1; }
 
-SOURCE_URL="${JTWZ_SOURCE_URL:-https://github.com/wstimin/JTWZ/archive/refs/heads/main.tar.gz}"
+SOURCE_URL="${JTWZ_SOURCE_URL:-}"
 TMP_DIR="$(mktemp -d /tmp/jtwz-one-click.XXXXXX)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-printf '\n[JTWZ] 一键部署启动器 revision 20261013.3\n'
-printf '[JTWZ] 下载 JTWZ 最新源码并准备一键安装\n'
+printf '\n[JTWZ] 一键部署启动器 revision 20261013.4\n'
+if [[ -z "$SOURCE_URL" ]]; then
+  RELEASE_JSON="$(curl -fsSL --connect-timeout 10 --max-time 30 -H 'Accept: application/vnd.github+json' 'https://api.github.com/repos/wstimin/JTWZ/releases/latest' || true)"
+  RELEASE_TAG="$(printf '%s' "$RELEASE_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  if [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+    SOURCE_URL="https://github.com/wstimin/JTWZ/releases/download/$RELEASE_TAG/jtwz-one-click-$RELEASE_TAG.tar.gz"
+    printf '[JTWZ] 下载最新正式安装包：%s\n' "$RELEASE_TAG"
+  else
+    SOURCE_URL='https://github.com/wstimin/JTWZ/archive/refs/heads/main.tar.gz'
+    printf '[JTWZ] 未找到正式 Release，改用 main 源码安装\n'
+  fi
+fi
+printf '[JTWZ] 下载并准备一键安装\n'
 curl -fL --retry 3 --connect-timeout 10 "$SOURCE_URL" -o "$TMP_DIR/jtwz-source.tar.gz"
 tar -xzf "$TMP_DIR/jtwz-source.tar.gz" -C "$TMP_DIR"
 DOWNLOADED_INSTALLER="$(find "$TMP_DIR" -path '*/deploy/installer/install.sh' -type f -print -quit)"

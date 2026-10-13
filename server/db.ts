@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { config } from './config.js'
 import { hashPassword } from './auth.js'
+import { runMigrations } from './migrations/index.js'
+import { currentRequestContext, safeAuditDetail } from './middleware/requestContext.js'
 
 export type DomainMode = 'redirect' | 'site' | 'download' | 'maintenance'
 export type DomainStatus = 'active' | 'pending' | 'paused' | 'error'
@@ -46,6 +48,24 @@ db.exec(`
     updated_at TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS certificates (
+    id TEXT PRIMARY KEY,
+    domain_id TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL DEFAULT 'manual',
+    issuer TEXT NOT NULL DEFAULT '',
+    serial_number TEXT NOT NULL DEFAULT '',
+    external_ref TEXT NOT NULL DEFAULT '',
+    issued_at TEXT,
+    expires_at TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'active', 'expiring', 'expired', 'error', 'revoked')),
+    auto_renew INTEGER NOT NULL DEFAULT 1,
+    note TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_certificates_domain ON certificates(domain_id, created_at DESC);
 
   CREATE TABLE IF NOT EXISTS redirect_rules (
     id TEXT PRIMARY KEY,
@@ -167,6 +187,8 @@ db.exec(`
     default_redirect_code INTEGER NOT NULL DEFAULT 302,
     auto_https INTEGER NOT NULL DEFAULT 1,
     traffic_alerts INTEGER NOT NULL DEFAULT 1,
+    public_maintenance INTEGER NOT NULL DEFAULT 0,
+    maintenance_message TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
   );
 
@@ -209,39 +231,41 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_upload_sessions_status ON upload_sessions(status, updated_at);
 
+  CREATE TABLE IF NOT EXISTS operation_tasks (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    label TEXT NOT NULL,
+    entity_type TEXT NOT NULL DEFAULT '',
+    entity_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+    progress INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    input_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT NOT NULL DEFAULT '',
+    logs_json TEXT NOT NULL DEFAULT '[]',
+    retryable INTEGER NOT NULL DEFAULT 0,
+    retry_of TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_operation_tasks_status ON operation_tasks(status, updated_at DESC);
+
   CREATE TABLE IF NOT EXISTS schema_migrations (
     name TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL
   );
 `)
 
-function ensureColumn(table: string, column: string, definition: string) {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Row[]
-  if (!columns.some((item) => String(item.name) === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
-}
-
-ensureColumn('sites', 'current_version_id', 'TEXT')
-ensureColumn('domains', 'verification_token', "TEXT NOT NULL DEFAULT ''")
-ensureColumn('domains', 'dns_status', "TEXT NOT NULL DEFAULT 'unverified'")
-ensureColumn('domains', 'certificate_status', "TEXT NOT NULL DEFAULT 'pending'")
-ensureColumn('domains', 'last_verified_at', 'TEXT')
-ensureColumn('redirect_rules', 'name', "TEXT NOT NULL DEFAULT ''")
-ensureColumn('redirect_rules', 'notes', "TEXT NOT NULL DEFAULT ''")
-ensureColumn('redirect_rules', 'starts_at', 'TEXT')
-ensureColumn('redirect_rules', 'expires_at', 'TEXT')
-ensureColumn('packages', 'byte_size', 'INTEGER NOT NULL DEFAULT 0')
-ensureColumn('packages', 'sha256', "TEXT NOT NULL DEFAULT ''")
-ensureColumn('packages', 'mime_type', "TEXT NOT NULL DEFAULT 'application/octet-stream'")
-ensureColumn('packages', 'updated_at', "TEXT NOT NULL DEFAULT ''")
-ensureColumn('packages', 'release_notes', "TEXT NOT NULL DEFAULT ''")
-ensureColumn('packages', 'version_id', 'TEXT')
-ensureColumn('settings', 'logo_path', "TEXT NOT NULL DEFAULT ''")
+runMigrations(db)
 
 const now = new Date().toISOString()
 const existingAdmin = db.prepare('SELECT id FROM admins WHERE username = ?').get(config.adminUsername)
 if (!existingAdmin) {
-  db.prepare('INSERT INTO admins (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)')
-    .run(randomUUID(), config.adminUsername, hashPassword(config.adminPassword), now)
+  db.prepare(`INSERT INTO admins (id, username, password_hash, display_name, role, status, updated_at, created_at)
+    VALUES (?, ?, ?, ?, 'owner', 'active', ?, ?)`).run(randomUUID(), config.adminUsername, hashPassword(config.adminPassword), config.adminUsername, now, now)
 }
 
 db.prepare(`INSERT OR IGNORE INTO settings
@@ -358,6 +382,29 @@ export function mapDomain(row: Row) {
   }
 }
 
+export function mapCertificate(row: Row) {
+  const expiresAt = row.expires_at ? String(row.expires_at) : undefined
+  const expiresInDays = expiresAt ? Math.ceil((Date.parse(expiresAt) - Date.now()) / (24 * 60 * 60 * 1000)) : undefined
+  return {
+    id: String(row.id),
+    domainId: String(row.domain_id),
+    hostname: String(row.hostname || ''),
+    provider: String(row.provider || 'manual'),
+    issuer: String(row.issuer || ''),
+    serialNumber: String(row.serial_number || ''),
+    externalRef: String(row.external_ref || ''),
+    issuedAt: row.issued_at ? String(row.issued_at) : undefined,
+    expiresAt,
+    expiresInDays,
+    status: String(row.status || 'pending'),
+    autoRenew: Boolean(row.auto_renew),
+    note: String(row.note || ''),
+    lastError: String(row.last_error || ''),
+    updatedAt: String(row.updated_at),
+    createdAt: String(row.created_at),
+  }
+}
+
 export function mapSettings(row: Row) {
   return {
     name: String(row.name),
@@ -368,6 +415,8 @@ export function mapSettings(row: Row) {
     defaultRedirectCode: Number(row.default_redirect_code) as 301 | 302,
     autoHttps: Boolean(row.auto_https),
     trafficAlerts: Boolean(row.traffic_alerts),
+    publicMaintenance: Boolean(row.public_maintenance),
+    maintenanceMessage: String(row.maintenance_message || ''),
   }
 }
 
@@ -443,9 +492,9 @@ export function mapSoftwareVersion(row: Row) {
 }
 
 export function audit(adminId: string | null, action: string, entityType: string, entityId = '', detail = '') {
-  db.prepare(`INSERT INTO audit_logs (id, admin_id, action, entity_type, entity_id, detail, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(randomUUID(), adminId, action, entityType, entityId, detail.slice(0, 1000), new Date().toISOString())
+  const context = currentRequestContext()
+  db.prepare(`INSERT INTO audit_logs (id, admin_id, action, entity_type, entity_id, detail, request_id, ip_address, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), adminId, action, entityType, entityId, safeAuditDetail(detail), context.requestId, context.ipAddress, new Date().toISOString())
 }
 
 export function recordEvent(eventType: string, domainId: string, path: string, referrer: string, userAgent: string) {

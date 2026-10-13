@@ -5,6 +5,7 @@ import type { DomainRecord, RedirectRuleRecord } from '../../types'
 import { DomainStatusBadge } from '../../components/StatusBadge'
 import { Modal } from '../../components/Modal'
 import { useToast } from '../../contexts/ToastContext'
+import { useAuth } from '../../contexts/AuthContext'
 import { apiJson } from '../../lib/api'
 
 function toDateTimeLocal(value?: string) {
@@ -30,6 +31,8 @@ export function RedirectsPage({ domains, rules, setRules }: { domains: DomainRec
   const [expiresAt, setExpiresAt] = useState('')
   const [saving, setSaving] = useState(false)
   const { notify } = useToast()
+  const { admin } = useAuth()
+  const canManage = Boolean(admin?.permissions.includes('content.manage'))
 
   useEffect(() => {
     if (!domainId && domains[0]) setDomainId(domains[0].id)
@@ -119,7 +122,7 @@ export function RedirectsPage({ domains, rules, setRules }: { domains: DomainRec
     <div className="page-stack">
       <section className="rules-hero panel">
         <div><span className="overline">Routing engine</span><h2>让每个路径抵达正确的页面。</h2><p>支持路径级规则、优先级、有效期、冲突检测和循环跳转保护。</p></div>
-        <button className="button button--primary" type="button" onClick={openCreate}><Plus /> 新建规则</button>
+        {canManage ? <button className="button button--primary" type="button" onClick={openCreate}><Plus /> 新建规则</button> : null}
       </section>
 
       <section className="rules-grid">
@@ -129,11 +132,11 @@ export function RedirectsPage({ domains, rules, setRules }: { domains: DomainRec
               <span className="rule-index">{String(index + 1).padStart(2, '0')}</span>
               <div><strong>{rule.name || rule.sourcePath}</strong>{rule.notes ? <small>{rule.notes}</small> : null}</div>
               <DomainStatusBadge status={rule.enabled ? 'active' : 'paused'} />
-              <div className="row-actions">
+              {canManage ? <div className="row-actions">
                 <button aria-label="编辑跳转规则" title="编辑跳转规则" type="button" onClick={() => openEdit(rule)}><Edit3 /></button>
                 <button aria-label={rule.enabled ? '停用跳转规则' : '启用跳转规则'} title={rule.enabled ? '停用跳转规则' : '启用跳转规则'} type="button" onClick={() => void toggleRule(rule)}>{rule.enabled ? <PauseCircle /> : <PlayCircle />}</button>
                 <button className="danger-icon" aria-label="删除跳转规则" title="删除跳转规则" type="button" onClick={() => void removeRule(rule)}><Trash2 /></button>
-              </div>
+              </div> : null}
             </div>
             <div className="rule-route">
               <div><small>来源</small><strong><Globe2 /> {rule.hostname}</strong><span>{rule.sourcePath} · {rule.preservePath ? '保留原始路径' : '统一跳转目标'}</span></div>
@@ -146,7 +149,7 @@ export function RedirectsPage({ domains, rules, setRules }: { domains: DomainRec
             </div>
           </article>
         ))}
-        {!sortedRules.length ? <div className="panel table-empty"><Waypoints /><strong>还没有路径级跳转规则</strong><span>新建规则后，系统会在域名默认目标之前按优先级匹配。</span><button className="button button--primary" type="button" onClick={openCreate}><Plus /> 新建第一条规则</button></div> : null}
+        {!sortedRules.length ? <div className="panel table-empty"><Waypoints /><strong>还没有路径级跳转规则</strong><span>新建规则后，系统会在域名默认目标之前按优先级匹配。</span>{canManage ? <button className="button button--primary" type="button" onClick={openCreate}><Plus /> 新建第一条规则</button> : null}</div> : null}
       </section>
 
       <Modal open={open} onClose={() => { if (!saving) { setOpen(false); resetForm() } }} eyebrow="Redirect rule" title={editingId ? '编辑跳转规则' : '新建跳转规则'} footer={<><button className="button button--secondary" type="button" onClick={() => { setOpen(false); resetForm() }} disabled={saving}>取消</button><button className="button button--primary" type="submit" form="redirect-rule-form" disabled={saving}><Check /> {saving ? '正在保存…' : '保存规则'}</button></>}>

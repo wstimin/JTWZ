@@ -3,7 +3,10 @@ import { useEffect, useState } from 'react'
 import type { AuditLogRecord } from '../../types'
 import { apiRequest } from '../../lib/api'
 
-const actionLabels: Record<string, string> = { create: '创建', update: '更新', delete: '删除', upload: '上传', publish: '发布', rollback: '回滚', verify: '验证', verify_failed: '验证失败', login: '登录', logout: '退出登录' }
+const actionLabels: Record<string, string> = {
+  create: '创建', update: '更新', delete: '删除', upload: '上传', publish: '发布', rollback: '回滚', verify: '验证', verify_failed: '验证失败', login: '登录', logout: '退出登录',
+  certificate_add: '登记证书', certificate_update: '更新证书', certificate_delete: '删除证书', certificate_issued: '签发证书', certificate_renewed: '续期证书', certificate_auto_renewed: '自动续期', certificate_failed: '证书失败',
+}
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
@@ -41,7 +44,7 @@ export function AuditLogsPage() {
 
   return (
     <div className="page-stack">
-      <section className="security-note panel">
+      <section className="security-note audit-summary-banner panel">
         <ShieldCheck />
         <div><strong>关键操作均已记录</strong><p>审计日志支持服务端筛选与分页，便于在大量记录中定位安全事件。</p></div>
       </section>
@@ -59,14 +62,15 @@ export function AuditLogsPage() {
         {error ? <div className="form-error" role="alert">{error}</div> : null}
         <div className="data-table-wrap">
           <table className="data-table audit-table">
-            <thead><tr><th>时间</th><th>操作</th><th>对象</th><th>详情</th></tr></thead>
+            <thead><tr><th>时间</th><th>管理员</th><th>操作</th><th>对象</th><th>详情 / 请求</th></tr></thead>
             <tbody>
               {logs.map((log, index) => (
                 <tr key={`${log.createdAt}-${log.entityId}-${index}`}>
                   <td data-label="时间"><time dateTime={log.createdAt}>{formatDate(log.createdAt)}</time></td>
+                  <td data-label="管理员"><div className="table-stack"><strong>{log.adminName || '系统'}</strong><small>{log.ipAddress || '本地任务'}</small></div></td>
                   <td data-label="操作"><span className="content-status" data-status={log.action === 'verify_failed' ? 'paused' : 'available'}>{actionLabels[log.action] || log.action}</span></td>
                   <td data-label="对象"><div className="table-stack"><strong>{log.entityType}</strong><small>{log.entityId || '—'}</small></div></td>
-                  <td data-label="详情"><span className="table-muted">{log.detail || '—'}</span></td>
+                  <td data-label="详情 / 请求"><div className="table-stack"><span className="table-muted">{log.detail || '—'}</span><small title={log.requestId}>{log.requestId ? `ID ${log.requestId}` : '无请求 ID'}</small></div></td>
                 </tr>
               ))}
             </tbody>

@@ -1,29 +1,9 @@
-# 使用 envsubst 或部署系统替换三个域名变量后加载此模板。
+# 使用 envsubst 或部署系统替换域名变量后加载此模板。
+# 公共页面、可配置管理入口和 /api 由同一个 JTWZ 服务分流。
 
 server {
   listen 443 ssl http2;
   server_name ${PUBLIC_DOMAIN};
-  root /opt/aurelia/dist/public;
-
-  location / {
-    try_files $uri $uri/ /index.html;
-  }
-}
-
-server {
-  listen 443 ssl http2;
-  server_name ${ADMIN_DOMAIN};
-  root /opt/aurelia/dist/admin;
-
-  add_header X-Robots-Tag "noindex, nofollow, noarchive" always;
-  location / {
-    try_files $uri $uri/ /index.html;
-  }
-}
-
-server {
-  listen 443 ssl http2;
-  server_name ${API_DOMAIN};
   client_max_body_size 2g;
 
   location / {
@@ -36,5 +16,6 @@ server {
   }
 }
 
-# 已验证的跳转域名和静态网站域名也应使用与 API_DOMAIN 相同的反向代理规则，
-# 但必须保留原始 Host，供平台选择对应的域名规则或网站版本。
+# ADMIN_DOMAIN 与 PUBLIC_DOMAIN 不同时，为管理域名增加相同的 server
+# 块。已验证的跳转域名和静态网站域名也使用相同的反向代理规则，
+# 并保留原始 Host，供平台选择对应的域名规则或网站版本。

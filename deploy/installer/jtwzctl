@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 APP_DIR="${JTWZ_APP_DIR:-/opt/jtwz}"
-ENV_FILE="$APP_DIR/.env"
+ENV_FILE="$APP_DIR/data/config.env"
+[[ -f "$ENV_FILE" ]] || ENV_FILE="$APP_DIR/.env"
 SERVICE_NAME="jtwz"
 API_URL="${JTWZ_API_URL:-}"
 COOKIE_FILE="${TMPDIR:-/tmp}/jtwzctl-$$.cookie"
@@ -19,9 +20,8 @@ env_value() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tail -n 1;
 restart_service() { if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then systemctl restart "$SERVICE_NAME"; elif command -v docker >/dev/null && [[ -f "$APP_DIR/docker-compose.yml" ]]; then (cd "$APP_DIR" && docker compose restart); fi; }
 
 access_urls() {
-  local public_url admin_url address port bind_host host
+  local public_url admin_url admin_origin admin_path address port bind_host host
   public_url="$(env_value PUBLIC_URL)"
-  admin_url="$(env_value ADMIN_LOGIN_URL)"
   if [[ -z "$public_url" ]]; then
     address="$(env_value PUBLIC_ADDRESS)"; [[ -n "$address" ]] || address="$(env_value PUBLIC_DOMAIN)"
     port="$(env_value API_PORT)"; port="${port:-8787}"
@@ -29,8 +29,34 @@ access_urls() {
     host="$address"; [[ "$host" == *:* ]] && host="[$host]"
     if [[ "$bind_host" == '0.0.0.0' || "$bind_host" == '::' ]]; then public_url="http://$host:$port"; else public_url="http://$host"; fi
   fi
-  [[ -n "$admin_url" ]] || admin_url="$public_url/admin/login"
+  admin_origin="$(env_value ADMIN_APP_ORIGIN)"; admin_origin="${admin_origin:-$public_url}"
+  admin_path="$(env_value ADMIN_BASE_PATH)"; admin_path="${admin_path:-/admin}"; admin_path="/${admin_path#/}"; admin_path="${admin_path%/}"
+  admin_url="${admin_origin%/}$admin_path/login"
   printf '公开首页：%s/\n管理登录：%s\n' "${public_url%/}" "$admin_url"
+}
+
+admin_path_update() {
+  [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
+  local next_path="${1:-}" current_path username password response
+  current_path="$(env_value ADMIN_BASE_PATH)"; current_path="${current_path:-/admin}"
+  if [[ -z "$next_path" ]]; then read -r -p "新的管理入口后缀 [$current_path]: " next_path; next_path="${next_path:-$current_path}"; fi
+  next_path="/${next_path#/}"; next_path="${next_path%/}"; next_path="${next_path,,}"
+  [[ "$next_path" =~ ^/[a-z0-9][a-z0-9_-]{3,63}$ ]] || die '管理入口后缀需为 4-64 位字母、数字、短横线或下划线。'
+  case "$next_path" in /api|/assets|/admin-assets|/downloads|/preview|/login) die '该管理入口后缀属于系统保留路径。' ;; esac
+  username="$(env_value ADMIN_USERNAME)"; password="$(env_value ADMIN_PASSWORD)"
+  if [[ -z "$username" || -z "$password" ]]; then
+    read -r -p '管理员账号: ' username
+    read -r -s -p '当前管理员密码: ' password; printf '\n' >&2
+  fi
+  api_login_with "$username" "$password"
+  response="$(curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/json' -X PUT -d "$(python3 - "$password" "$next_path" <<'PY'
+import json, sys
+print(json.dumps({'currentPassword': sys.argv[1], 'adminBasePath': sys.argv[2]}))
+PY
+)" "$API_URL/api/admin/access")" || die '管理入口修改失败。'
+  printf '%s' "$response" | pretty_json
+  say '新的访问地址'
+  access_urls
 }
 
 api_login() {
@@ -45,12 +71,22 @@ api_login() {
 }
 
 api_login_with() {
-  local username="$1" password="$2" response
+  local username="$1" password="$2" response challenge code
   response="$(curl -fsS -c "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$username" "$password" <<'PY'
 import json, sys
 print(json.dumps({'username': sys.argv[1], 'password': sys.argv[2]}))
 PY
 )" "$API_URL/api/auth/login")" || die 'API 登录失败，请确认服务和管理员凭据。'
+  if printf '%s' "$response" | grep -q '"requiresTwoFactor":true'; then
+    challenge="$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("challengeId", ""))')"
+    [[ -n "$challenge" ]] || die '服务器要求双重验证，但未返回验证挑战。'
+    read -r -p '动态验证码或恢复码: ' code
+    response="$(curl -fsS -b "$COOKIE_FILE" -c "$COOKIE_FILE" -H 'Content-Type: application/json' -d "$(python3 - "$challenge" "$code" <<'PY'
+import json, sys
+print(json.dumps({'challengeId': sys.argv[1], 'code': sys.argv[2]}))
+PY
+)" "$API_URL/api/auth/two-factor")" || die '双重验证失败。'
+  fi
   printf '%s' "$response" | grep -q '"username"' || die 'API 登录未通过。'
 }
 
@@ -138,7 +174,7 @@ ssl_update() {
 
 config_show() {
   [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
-  sed -E 's/^(ADMIN_PASSWORD|APP_SECRET|S3_SECRET_KEY|CLOUDFLARE_API_TOKEN)=.*/\1=******/' "$ENV_FILE"
+  sed -E 's/^(ADMIN_PASSWORD|APP_SECRET|S3_ACCESS_KEY|S3_SECRET_KEY|CLOUDFLARE_API_TOKEN|DNS_WEBHOOK_SECRET|ALERT_WEBHOOK_SECRET|CERTIFICATE_CALLBACK_SECRET)=.*/\1=******/' "$ENV_FILE"
 }
 
 config_set() {
@@ -163,6 +199,7 @@ for line in lines:
 if not found: out.append(key + '=' + value)
 p.write_text('\n'.join(out) + '\n')
 PY
+  if id -u jtwz >/dev/null 2>&1; then chown root:jtwz "$ENV_FILE"; chmod 640 "$ENV_FILE"; else chmod 600 "$ENV_FILE"; fi
   restart_service
   say '配置已保存并重启服务。'
 }
@@ -170,96 +207,37 @@ PY
 backup_create() { api_login; curl -fsS -b "$COOKIE_FILE" -X POST "$API_URL/api/admin/backups/create" | pretty_json; }
 backup_list() { api_login; curl -fsS -b "$COOKIE_FILE" "$API_URL/api/admin/backups" | pretty_json; }
 
-system_update() {
-  [[ "$(id -u)" == 0 ]] || die '更新系统需要 root 权限，请使用 sudo jt update。'
-  need python3; need tar; need sha256sum
-  local requested_tag="${1:-}" current_version release_json target_tag target_version asset_name release_base
-  local temp_dir archive checksum_file expected_checksum actual_checksum installer confirm rollback_dir item path sum
-
-  current_version="$(python3 - "$APP_DIR/package.json" <<'PY'
-import json, sys
-try:
-    print(json.load(open(sys.argv[1], encoding='utf-8')).get('version', 'unknown'))
-except Exception:
-    print('unknown')
-PY
-)"
-
-  if [[ -n "$requested_tag" ]]; then
-    target_tag="$requested_tag"
-    [[ "$target_tag" == v* ]] || target_tag="v$target_tag"
-  else
-    say '正在检查 GitHub 最新正式版本...'
-    release_json="$(curl -fsSL --connect-timeout 10 --max-time 30 -H 'Accept: application/vnd.github+json' 'https://api.github.com/repos/wstimin/JTWZ/releases/latest')" || die '无法检查 GitHub 最新版本。'
-    target_tag="$(printf '%s' "$release_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name", ""))')"
-  fi
-  [[ "$target_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || die "目标版本格式无效：$target_tag"
-  target_version="${target_tag#v}"
-
-  say "当前版本：v$current_version"
-  say "目标版本：$target_tag"
-  if [[ "$current_version" == "$target_version" ]]; then
-    say '当前已经是最新版本，无需更新。'
-    return 0
-  fi
-
-  read -r -p "确认更新到 $target_tag？输入 UPDATE: " confirm
-  [[ "$confirm" == UPDATE ]] || die '已取消更新。'
-
-  asset_name="jtwz-one-click-$target_tag.tar.gz"
-  release_base="https://github.com/wstimin/JTWZ/releases/download/$target_tag"
-  temp_dir="$(mktemp -d /tmp/jtwz-update.XXXXXX)"
-  archive="$temp_dir/$asset_name"
-  checksum_file="$temp_dir/SHA256SUMS"
-  rollback_dir="/opt/jtwz-code-rollback-${current_version}-$(date +%Y%m%d-%H%M%S)"
-
-  say '更新前创建完整迁移备份...'
-  backup_create >/dev/null || { rm -rf "$temp_dir"; die '完整备份失败，更新已终止。'; }
-
-  say "下载 $asset_name..."
-  curl -fL --retry 3 --connect-timeout 10 "$release_base/$asset_name" -o "$archive" || { rm -rf "$temp_dir"; die '更新包下载失败。'; }
-  curl -fL --retry 3 --connect-timeout 10 "$release_base/SHA256SUMS" -o "$checksum_file" || { rm -rf "$temp_dir"; die '校验文件下载失败。'; }
-
-  expected_checksum=''
-  while read -r sum path; do
-    [[ "${path##*/}" == "$asset_name" ]] && expected_checksum="$sum" && break
-  done < "$checksum_file"
-  [[ -n "$expected_checksum" ]] || { rm -rf "$temp_dir"; die 'SHA-256 清单中没有目标安装包。'; }
-  actual_checksum="$(sha256sum "$archive" | awk '{print $1}')"
-  [[ "$actual_checksum" == "$expected_checksum" ]] || { rm -rf "$temp_dir"; die '安装包 SHA-256 校验失败，更新已终止。'; }
-
-  tar -xzf "$archive" -C "$temp_dir"
-  installer="$(find "$temp_dir" -path '*/installer/install.sh' -type f -print -quit)"
-  [[ -n "$installer" ]] || { rm -rf "$temp_dir"; die '更新包结构不完整。'; }
-
-  install -d -m 700 "$rollback_dir"
-  for item in package.json package-lock.json dist dist-server; do
-    path="$APP_DIR/$item"
-    [[ -e "$path" ]] && cp -a "$path" "$rollback_dir/"
-  done
-  [[ -f /usr/local/bin/jtwzctl ]] && cp -a /usr/local/bin/jtwzctl "$rollback_dir/jtwzctl"
-
-  say '校验通过，开始安装新版本...'
-  if bash "$installer" standalone; then
-    rm -rf "$temp_dir" "$rollback_dir"
-    say "系统已更新到 $target_tag。请重新运行 jt 查看新菜单。"
-    return 0
-  fi
-
-  say '更新失败，正在恢复上一版程序...'
-  for item in package.json package-lock.json dist dist-server; do
-    [[ -e "$rollback_dir/$item" ]] || continue
-    rm -rf "$APP_DIR/$item"
-    cp -a "$rollback_dir/$item" "$APP_DIR/"
-  done
-  if [[ -f "$APP_DIR/package-lock.json" ]]; then npm --prefix "$APP_DIR" ci --omit=dev; else npm --prefix "$APP_DIR" install --omit=dev; fi
-  if [[ -f "$rollback_dir/jtwzctl" ]]; then
-    install -m 755 "$rollback_dir/jtwzctl" /usr/local/bin/jtwzctl
-    ln -sfn /usr/local/bin/jtwzctl /usr/local/bin/jt
-  fi
+backup_restore() {
+  local archive="${1:-}" confirm response
+  [[ -n "$archive" ]] || read -r -p '完整备份文件路径: ' archive
+  [[ -f "$archive" ]] || die "备份文件不存在：$archive"
+  read -r -p '恢复会替换网站数据和运行配置，系统会自动创建回滚备份。输入 RESTORE 继续: ' confirm
+  [[ "$confirm" == RESTORE ]] || die '已取消恢复。'
+  api_login
+  response="$(curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/octet-stream' --data-binary "@$archive" "$API_URL/api/admin/import")" || die '恢复失败；服务端会自动尝试回滚，请查看服务日志。'
+  printf '%s' "$response" | pretty_json
+  say '完整备份已恢复，正在重启服务使运行配置完全生效。'
   restart_service
-  rm -rf "$temp_dir" "$rollback_dir"
-  die '更新失败，已恢复上一版程序。'
+  status
+}
+
+system_update_safe() {
+  local status_json confirm response
+  api_login
+  say '正在检查带 Ed25519 签名的正式更新清单...'
+  status_json="$(curl -fsS -b "$COOKIE_FILE" -X POST "$API_URL/api/admin/system/update/check")" || die '版本检测失败。'
+  printf '%s' "$status_json" | pretty_json
+  printf '%s' "$status_json" | grep -q '"configured":true' || die '更新清单或签名公钥尚未配置。'
+  printf '%s' "$status_json" | grep -q '"updateAvailable":true' || { say '当前已经是最新版本。'; return 0; }
+  read -r -p '系统将先创建完整备份，再校验更新包并执行健康检查。输入 UPDATE 继续: ' confirm
+  [[ "$confirm" == UPDATE ]] || die '已取消更新。'
+  response="$(curl -fsS -b "$COOKIE_FILE" -X POST "$API_URL/api/admin/system/update/install")" || die '更新启动失败。'
+  printf '%s' "$response" | pretty_json
+  if printf '%s' "$response" | grep -q '"applyStarted":true'; then
+    say '更新执行器已接管；失败时会自动恢复上一版程序。稍后运行 jt status 查看结果。'
+  else
+    say '更新包已校验并暂存，但当前部署方式没有配置自动切换执行器；请按面板或容器升级流程切换版本。'
+  fi
 }
 
 account_update() {
@@ -272,7 +250,8 @@ account_update() {
     read -r -s -p '当前管理员密码: ' current_password; printf '\n' >&2
   fi
   read -r -p "新管理员账号 [$current_username]: " new_username; new_username="${new_username:-$current_username}"
-  read -r -s -p '新管理员密码（至少 10 位，包含字母和数字）: ' new_password; printf '\n' >&2
+  read -r -s -p '新管理员密码（至少 6 位）: ' new_password; printf '\n' >&2
+  [[ "${#new_password}" -ge 6 ]] || die '管理员密码至少需要 6 位。'
   api_login_with "$current_username" "$current_password"
   curl -fsS -b "$COOKIE_FILE" -H 'Content-Type: application/json' -X PUT -d "$(python3 - "$current_password" "$new_password" "$new_username" <<'PY'
 import json, sys
@@ -292,7 +271,7 @@ for key, value in replacements.items():
     if key not in seen: out.append(key + '=' + value)
 p.write_text('\n'.join(out) + '\n')
 PY
-  chmod 600 "$ENV_FILE"
+  if id -u jtwz >/dev/null 2>&1; then chown root:jtwz "$ENV_FILE"; chmod 640 "$ENV_FILE"; else chmod 600 "$ENV_FILE"; fi
   say '管理员账号和密码已更新。'
 }
 
@@ -314,7 +293,8 @@ uninstall() {
   fi
   if [[ "$mode" == purge && -d "$APP_DIR/data" ]]; then rm -rf "$APP_DIR/data"; fi
   rm -rf "$APP_DIR"
-  rm -f /usr/local/bin/jtwzctl /usr/local/bin/jt
+  rm -f /usr/local/bin/jtwzctl /usr/local/bin/jt /usr/local/bin/jtwz-update /etc/sudoers.d/jtwz-update
+  if [[ "$mode" == purge ]] && id -u jtwz >/dev/null 2>&1; then userdel jtwz || true; fi
   say 'JTWZ 程序已卸载。SSL 证书不会被自动删除，如需清理请使用 certbot delete。'
 }
 
@@ -326,6 +306,17 @@ status() {
     say '访问地址'
     access_urls
   fi
+  if [[ -f "$APP_DIR/data/updates/state.json" ]]; then say '最近更新状态'; cat "$APP_DIR/data/updates/state.json" | pretty_json; fi
+}
+
+service_logs() {
+  if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
+    journalctl -u "$SERVICE_NAME" --no-pager -n 100
+  elif command -v docker >/dev/null && [[ -f "$APP_DIR/docker-compose.yml" ]]; then
+    (cd "$APP_DIR" && docker compose logs --tail 100)
+  else
+    die '未找到可读取的 systemd 或 Docker 服务。'
+  fi
 }
 
 menu() {
@@ -333,20 +324,23 @@ menu() {
     cat <<'EOF'
 
 JTWZ 服务器管理
-1) 查看系统与服务状态   2) 查看域名
-3) 添加域名              4) 修改域名
-5) 删除域名              6) 查看 SSL 证书
-7) 添加 SSL 证书          8) 删除 SSL 证书
-9) 修改 SSL 域名          10) 查看配置
-11) 修改配置              12) 修改管理员账号密码
-13) 创建完整备份          14) 查看备份
-15) 检查并更新系统        16) 重启服务
-17) 卸载并保留数据        18) 卸载并清除数据
+1) 查看系统与服务状态     2) 查看当前访问地址
+3) 修改管理后台后缀       4) 查看域名
+5) 添加域名                6) 修改域名
+7) 删除域名                8) 查看 SSL 证书
+9) 添加 SSL 证书          10) 删除 SSL 证书
+11) 修改 SSL 域名         12) 修改管理员账号密码
+13) 查看配置              14) 修改配置
+15) 创建完整备份          16) 查看备份
+17) 检查并更新系统        18) 重启服务
+19) 卸载并保留数据        20) 卸载并清除数据
+21) 上传完整备份并恢复
+22) 查看最近服务日志
 0) 退出
 EOF
     local choice; read -r -p '请选择: ' choice
     case "$choice" in
-      1) status ;; 2) domain_list ;; 3) domain_add ;; 4) domain_update ;; 5) domain_delete ;; 6) ssl_list ;; 7) ssl_add ;; 8) ssl_delete ;; 9) ssl_update ;; 10) config_show ;; 11) config_set ;; 12) account_update ;; 13) backup_create ;; 14) backup_list ;; 15) system_update ;; 16) restart_service; status ;; 17) uninstall keep ;; 18) uninstall purge ;; 0) break ;; *) say '无效选项。' ;;
+      1) status ;; 2) access_urls ;; 3) admin_path_update ;; 4) domain_list ;; 5) domain_add ;; 6) domain_update ;; 7) domain_delete ;; 8) ssl_list ;; 9) ssl_add ;; 10) ssl_delete ;; 11) ssl_update ;; 12) account_update ;; 13) config_show ;; 14) config_set ;; 15) backup_create ;; 16) backup_list ;; 17) system_update_safe ;; 18) restart_service; status ;; 19) uninstall keep ;; 20) uninstall purge ;; 21) backup_restore ;; 22) service_logs ;; 0) break ;; *) say '无效选项。' ;;
     esac
   done
 }
@@ -354,13 +348,16 @@ EOF
 case "${1:-menu}" in
   menu) menu ;;
   status|info) status ;;
+  access|urls) access_urls ;;
+  admin-path) case "${2:-show}" in show) access_urls ;; set|update) admin_path_update "${3:-}" ;; *) die '用法：jtwzctl admin-path {show|set [后缀]}' ;; esac ;;
   domain) case "${2:-list}" in list) domain_list ;; add) domain_add ;; update|edit) domain_update ;; delete|remove) domain_delete ;; *) die '用法：jtwzctl domain {list|add|update|delete}' ;; esac ;;
   ssl) case "${2:-list}" in list) ssl_list ;; add) ssl_add ;; update|edit) ssl_update ;; delete|remove) ssl_delete ;; renew) need certbot; certbot renew; command -v nginx >/dev/null && systemctl reload nginx || true ;; *) die '用法：jtwzctl ssl {list|add|update|delete|renew}' ;; esac ;;
   config) case "${2:-show}" in show) config_show ;; set|update) config_set ;; *) die '用法：jtwzctl config {show|set}' ;; esac ;;
-  backup) case "${2:-create}" in create) backup_create ;; list) backup_list ;; *) die '用法：jtwzctl backup {create|list}' ;; esac ;;
-  update|upgrade) system_update "${2:-}" ;;
+  backup) case "${2:-create}" in create) backup_create ;; list) backup_list ;; restore|import) backup_restore "${3:-}" ;; *) die '用法：jtwzctl backup {create|list|restore [文件]}' ;; esac ;;
+  update|upgrade) system_update_safe ;;
   account) account_update ;;
   uninstall) uninstall ;;
   restart) restart_service ;;
-  *) die '用法：jtwzctl {menu|status|domain|ssl|config|account|backup|update|uninstall|restart}' ;;
+  logs) service_logs ;;
+  *) die '用法：jtwzctl {menu|status|logs|access|admin-path|domain|ssl|config|account|backup|update|uninstall|restart}' ;;
 esac

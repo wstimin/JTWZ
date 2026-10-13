@@ -2,6 +2,8 @@ import { ArrowRight, Box, Check, Download, FileCode2, Globe2, PackageCheck, Shie
 import { Link } from 'react-router-dom'
 import type { AnnouncementRecord, BrandSettings, SoftwareRecord } from '../types'
 import { PublicNav } from '../components/PublicNav'
+import { PublicMeta } from '../components/PublicMeta'
+import { PublicNotice } from '../components/PublicState'
 
 const capabilities = [
   { index: '01', eyebrow: 'Domain routing', title: '让每个域名抵达正确页面', description: '来源域名、目标地址、路径保留与生效时间全部动态配置，跳转业务与软件下载保持独立。', icon: Globe2 },
@@ -15,14 +17,16 @@ function formatDownloads(value: number) {
   return value.toLocaleString('zh-CN')
 }
 
-export function LandingPage({ settings, software, announcements }: { settings: BrandSettings; software: SoftwareRecord[]; announcements: AnnouncementRecord[] }) {
+export function LandingPage({ settings, software, announcements, notice, onRetry }: { settings: BrandSettings; software: SoftwareRecord[]; announcements: AnnouncementRecord[]; notice?: string; onRetry: () => void }) {
   const featured = software[0]
   const totalDownloads = software.reduce((sum, item) => sum + item.downloads, 0)
   const platformCount = new Set(software.map((item) => item.platform).filter(Boolean)).size
 
   return (
     <div className="marketing-page public-home">
+      <PublicMeta title={settings.name} description={settings.tagline || '软件产品、版本更新与安全下载。'} brand={settings.name} />
       <PublicNav settings={settings} />
+      {notice ? <PublicNotice message={notice} onRetry={onRetry} /> : null}
 
       <main>
         <section className="hero-section shell public-home-hero">
@@ -100,7 +104,7 @@ export function LandingPage({ settings, software, announcements }: { settings: B
         <section className="public-cta shell"><div className="glass-card public-cta-inner"><div><p className="eyebrow">Ready when you are</p><h2>找到适合你的版本，开始使用。</h2><p>前往软件下载中心查看当前公开产品、平台安装包和版本更新说明。</p></div><Link className="button button--primary" to="/downloads">前往下载中心 <ArrowRight /></Link></div></section>
       </main>
 
-      <footer className="public-footer shell"><div className="brand-footer"><strong>{settings.name}</strong><span>{settings.footerText}</span></div><div className="footer-links"><Link to="/downloads"><Download /> 软件下载</Link>{settings.supportEmail ? <a href={`mailto:${settings.supportEmail}`}>联系我们</a> : null}<span>© 2026</span></div></footer>
+      <footer className="public-footer shell"><div className="brand-footer"><strong>{settings.name}</strong><span>{settings.footerText}</span></div><div className="footer-links"><Link to="/downloads"><Download /> 软件下载</Link>{settings.supportEmail ? <a href={`mailto:${settings.supportEmail}`}>联系我们</a> : null}<span>© {new Date().getFullYear()}</span></div></footer>
     </div>
   )
 }

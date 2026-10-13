@@ -2,9 +2,11 @@
 
 JTWZ 是一个面向生产环境的综合平台，用于管理多域名跳转、静态网站发布和软件分发。
 
-当前稳定版本：[`v1.0.2`](https://github.com/wstimin/JTWZ/releases/tag/v1.0.2)
+当前稳定版本：[`v1.0.3`](https://github.com/wstimin/JTWZ/releases/tag/v1.0.3)
 
 它将公开展示端、管理后台和 API 分开构建：公开站负责产品介绍、公告和下载；管理端负责域名、跳转规则、站点、软件、版本、安装包、备份和系统设置；API 负责鉴权、数据持久化、对象存储直传、统计和运行时域名处理。
+
+专业安全能力包括多管理员、所有者/管理员/内容编辑/只读审计四级角色、TOTP 双重验证和恢复码、设备会话撤销、新设备登录告警、CSRF 与来源校验、请求 ID、审计脱敏、上传文件签名校验，以及 systemd/Docker 非 root 运行。
 
 仓库只保存源码、部署脚本和必要教程。`dist/`、`dist-server/`、数据库、临时截图以及 ZIP/TAR 生成物不会提交到仓库。正式安装包由 GitHub Actions 在发布标签后生成，并作为 Release 资产提供下载。
 
@@ -24,7 +26,7 @@ bash <(curl -fsSL -H 'Accept: application/vnd.github.raw' 'https://api.github.co
 
 ```text
 公开首页：http://公网IP:8787/
-管理登录：http://公网IP:8787/admin/login
+管理登录：http://公网IP:8787/{安装时设置的管理后缀}/login
 ```
 
 如果云服务器启用了安全组，需要放行 TCP `8787`。使用域名和 Nginx 反向代理时则使用标准的 HTTP/HTTPS 端口。
@@ -33,7 +35,7 @@ bash <(curl -fsSL -H 'Accept: application/vnd.github.raw' 'https://api.github.co
 sudo jt
 ```
 
-即可调出交互管理菜单；`sudo jtwzctl menu` 仍然兼容。菜单支持状态查看、域名增删改查、SSL 证书管理、配置修改、账号密码修改、完整备份、在线检查更新、服务重启和保留/清除数据卸载。更新会先创建完整备份、验证安装包 SHA-256，并在安装失败时恢复上一版程序。
+即可调出交互管理菜单；`sudo jtwzctl menu` 仍然兼容。菜单支持访问地址与管理后缀、域名增删改查、SSL 证书管理、配置修改、账号密码修改、完整备份与跨服务器恢复、在线检查更新、服务重启和保留/清除数据卸载。更新会先创建完整备份，同时验证 Ed25519 发布签名和安装包 SHA-256；数据库迁移或健康检查失败时自动恢复上一版程序。
 
 ### 方案 B：宝塔
 
@@ -64,6 +66,14 @@ sudo jt
 4. 在 1Panel 或反向代理中绑定公开域名和管理域名，再登录后台完成系统设置。
 
 SSL 操作要求域名已经解析到当前服务器，并由 certbot/Nginx 完成验证。
+
+### 方案 D：Docker Compose + Caddy
+
+仓库提供 `deploy/docker/docker-compose.yml`，包含持久化 volume、容器健康检查、非 root 运行和 Caddy HTTPS 反向代理。配置 `.env` 与 `JTWZ_DOMAIN` 后执行：
+
+```bash
+docker compose -f deploy/docker/docker-compose.yml up -d --build
+```
 
 ## 2. 本地开发
 
@@ -99,8 +109,9 @@ npm start
 - `jtwz-1panel-vX.Y.Z.tar.gz`
 - `jtwz-one-click-vX.Y.Z.tar.gz`
 - `SHA256SUMS`
+- `update-manifest.json`（Ed25519 签名更新清单）
 
-安装包只放在 GitHub Release，不会混入源码分支。发布前请确认版本号已同步到 `package.json`、安装包 manifest 和备份兼容版本。
+安装包只放在 GitHub Release，不会混入源码分支。发布工作流要求仓库 Secret `JTWZ_UPDATE_PRIVATE_KEY_B64`；服务器只保存对应的 Ed25519 公钥。发布前请确认版本号已同步到 `package.json`、安装包 manifest 和备份兼容版本。
 
 ## 4. 目录说明
 
@@ -120,16 +131,18 @@ docs/                生产部署教程
 /                 公开首页
 /downloads        软件下载中心
 /downloads/:slug  软件详情和版本历史
-/admin/login      管理员登录
-/admin            管理后台
-/admin/domains    域名管理
-/admin/redirects  跳转规则
-/admin/sites      静态网站
-/admin/software   软件管理
-/admin/versions   版本管理
-/admin/packages   安装包管理
-/admin/settings   系统设置
+${ADMIN_BASE_PATH}/login      管理员登录
+${ADMIN_BASE_PATH}            管理后台
+${ADMIN_BASE_PATH}/domains    域名管理
+${ADMIN_BASE_PATH}/redirects  跳转规则
+${ADMIN_BASE_PATH}/sites      静态网站
+${ADMIN_BASE_PATH}/software   软件管理
+${ADMIN_BASE_PATH}/versions   版本管理
+${ADMIN_BASE_PATH}/packages   安装包管理
+${ADMIN_BASE_PATH}/settings   系统设置
 ```
+
+`ADMIN_BASE_PATH` 默认是 `/admin`，可在安装向导、管理后台或 `sudo jt admin-path set /新后缀` 中修改。公开端和管理端使用独立主题偏好，互不影响。
 
 ## 6. 生产部署参考
 

@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import type { BrandSettings, PackageRecord, SoftwareRecord } from '../types'
 import { PublicNav } from '../components/PublicNav'
+import { PublicMeta } from '../components/PublicMeta'
 import { apiRequest } from '../lib/api'
 import { useToast } from '../contexts/ToastContext'
 import { apiUrl } from '../lib/appUrls'
@@ -28,11 +29,12 @@ export function SoftwareDetailPage({ settings }: { settings: BrandSettings }) {
 
   return (
     <div className="marketing-page downloads-page">
+      <PublicMeta title={software?.name || '软件详情'} description={software?.description || '查看软件版本、安装包和完整性校验信息。'} brand={settings.name} noIndex={Boolean(error)} />
       <PublicNav settings={settings} />
       <main className="shell detail-main">
         <Link className="text-link detail-back" to="/downloads"><ArrowLeft /> 返回软件下载中心</Link>
         {loading ? <div className="empty-state"><FileArchive /><h2>正在读取软件详情</h2><p>请稍候…</p></div> : null}
-        {error ? <div className="empty-state"><FileArchive /><h2>无法加载软件</h2><p>{error}</p></div> : null}
+        {error ? <div className="empty-state"><FileArchive /><h2>无法加载软件</h2><p>{error}</p><Link className="button button--secondary" to="/downloads">返回软件下载中心</Link></div> : null}
         {software ? <>
           <section className="software-detail-hero glass-card">
             <div className="software-monogram">{software.accent}</div>

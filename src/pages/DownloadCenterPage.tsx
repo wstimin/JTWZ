@@ -1,17 +1,16 @@
 import { ArrowRight, Download, Search, ShieldCheck } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { AnnouncementRecord, BrandSettings, SoftwareRecord } from '../types'
 import { PublicNav } from '../components/PublicNav'
+import { PublicMeta } from '../components/PublicMeta'
+import { PublicNotice } from '../components/PublicState'
 import { useToast } from '../contexts/ToastContext'
-import { apiRequest } from '../lib/api'
 import { apiUrl } from '../lib/appUrls'
 
-export function DownloadCenterPage({ settings, software }: { settings: BrandSettings; software: SoftwareRecord[] }) {
+export function DownloadCenterPage({ settings, software, announcements, notice, onRetry }: { settings: BrandSettings; software: SoftwareRecord[]; announcements: AnnouncementRecord[]; notice?: string; onRetry: () => void }) {
   const [query, setQuery] = useState('')
-  const [announcements, setAnnouncements] = useState<AnnouncementRecord[]>([])
   const { notify } = useToast()
-  useEffect(() => { void apiRequest<{ announcements: AnnouncementRecord[] }>('/api/public/announcements').then((result) => setAnnouncements(result.announcements)).catch(() => undefined) }, [])
   const filtered = useMemo(
     () => software.filter((item) => `${item.name} ${item.platform} ${item.description}`.toLowerCase().includes(query.toLowerCase())),
     [query, software],
@@ -19,7 +18,9 @@ export function DownloadCenterPage({ settings, software }: { settings: BrandSett
 
   return (
     <div className="marketing-page downloads-page">
+      <PublicMeta title="软件下载" description={`获取 ${settings.name} 已发布的软件、版本说明与安全校验信息。`} brand={settings.name} />
       <PublicNav settings={settings} />
+      {notice ? <PublicNotice message={notice} onRetry={onRetry} /> : null}
       <main className="shell downloads-main">
         <section className="downloads-hero">
           <div>
@@ -60,7 +61,7 @@ export function DownloadCenterPage({ settings, software }: { settings: BrandSett
           ))}
         </div>
 
-        {filtered.length === 0 ? <div className="empty-state"><Search /><h2>没有找到相关软件</h2><p>请尝试其他软件名称或平台关键词。</p></div> : null}
+        {filtered.length === 0 ? <div className="empty-state"><Search /><h2>{query ? '没有找到相关软件' : '暂无公开软件'}</h2><p>{query ? '请尝试其他软件名称或平台关键词。' : '产品完成发布后会出现在这里。'}</p></div> : null}
 
         <section className="download-safety glass-card">
           <ShieldCheck />

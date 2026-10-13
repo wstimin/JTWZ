@@ -18,6 +18,8 @@ data/temp/*
 data/updates/*
 data/brand-assets/*
 dist-server/
+artifacts/
+release-signing-private.pem
 
 # Local visual QA screenshots and TypeScript build metadata
 preview-*.png
