@@ -48,12 +48,25 @@ reload_nginx() {
   systemctl reload nginx
 }
 
+open_web_ports() {
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw allow 80/tcp >/dev/null
+    ufw allow 443/tcp >/dev/null
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-service=http >/dev/null
+    firewall-cmd --permanent --add-service=https >/dev/null
+    firewall-cmd --reload >/dev/null
+  fi
+}
+
 case "$ACTION" in
   route)
+    open_web_ports
     [[ -f "$CONF_FILE" ]] || write_http_route
     reload_nginx
     ;;
   ensure)
+    open_web_ports
     [[ -f "$CONF_FILE" ]] || write_http_route
     reload_nginx
     need certbot

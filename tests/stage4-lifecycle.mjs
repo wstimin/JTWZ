@@ -132,6 +132,8 @@ try {
   const redirectBeforeCertificate = await domainRequest('/welcome?from=test')
   assert.equal(redirectBeforeCertificate.status, 302)
   assert.equal(redirectBeforeCertificate.location, 'https://example.org/welcome?from=test')
+  const appliedRoute = await json(`/api/domains/${createdDomain.domain.id}/apply-route`, 'POST')
+  assert.equal(appliedRoute.ok, true)
   const issued = await json(`/api/domains/${createdDomain.domain.id}/issue-certificate`, 'POST')
   assert.equal(issued.certificate.status, 'active')
   assert.equal(issued.task.status, 'succeeded')

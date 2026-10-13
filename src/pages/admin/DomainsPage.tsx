@@ -34,7 +34,8 @@ interface DnsInstructions {
   certificateStatus: string
   lastVerifiedAt?: string
   dnsProvider: { provider: 'manual' | 'cloudflare' | 'webhook'; configured: boolean }
-  certificateProvider: { provider: 'manual' | 'cloudflare' | 'webhook'; configured: boolean }
+  certificateProvider: { provider: 'manual' | 'certbot' | 'cloudflare' | 'webhook'; configured: boolean }
+  routeAutomationConfigured: boolean
 }
 
 interface DomainsPageProps {
@@ -65,6 +66,7 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
   const [dnsInstructions, setDnsInstructions] = useState<DnsInstructions | null>(null)
   const [checkingDns, setCheckingDns] = useState(false)
   const [publishingDns, setPublishingDns] = useState(false)
+  const [applyingRoute, setApplyingRoute] = useState(false)
   const [issuingCertificate, setIssuingCertificate] = useState(false)
   const [certificates, setCertificates] = useState<CertificateRecord[]>([])
   const [certificateFailures, setCertificateFailures] = useState<CertificateFailure[]>([])
@@ -197,15 +199,28 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
     if (!dnsDomain) return
     setCheckingDns(true)
     try {
-      const result = await apiJson<{ domain: DomainRecord }>(`/api/domains/${encodeURIComponent(dnsDomain.id)}/verify-dns`, 'POST')
+      const result = await apiJson<{ domain: DomainRecord; routeWarning?: string }>(`/api/domains/${encodeURIComponent(dnsDomain.id)}/verify-dns`, 'POST')
       setDomains((current) => current.map((item) => item.id === result.domain.id ? result.domain : item))
       setDnsDomain(result.domain)
       setDnsInstructions((current) => current ? { ...current, dnsStatus: 'verified', certificateStatus: result.domain.certificateStatus || 'pending', lastVerifiedAt: result.domain.lastVerifiedAt } : current)
-      notify('DNS 所有权验证成功，域名已进入 HTTPS 配置流程')
+      notify(result.routeWarning || 'DNS 所有权验证成功，域名入口已生效', result.routeWarning ? 'info' : 'success')
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : 'DNS 验证失败', 'info')
     } finally {
       setCheckingDns(false)
+    }
+  }
+
+  async function applyDomainRoute() {
+    if (!dnsDomain) return
+    setApplyingRoute(true)
+    try {
+      await apiJson(`/api/domains/${encodeURIComponent(dnsDomain.id)}/apply-route`, 'POST')
+      notify('域名入口已重新配置，并已放行本机 80/443 端口')
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : '域名入口修复失败', 'info')
+    } finally {
+      setApplyingRoute(false)
     }
   }
 
@@ -371,6 +386,7 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
         {dnsInstructions ? <div className="form-stack">
           <div className="form-note"><ShieldCheck /><div><strong>添加一条 TXT 记录</strong><span>{dnsInstructions.dnsProvider.configured ? '已接入 DNS 服务商，可自动写入；也可以手动添加以下记录。' : '请登录域名 DNS 服务商控制台，添加以下记录。生效后点击“立即验证”。'}</span></div></div>
           {canManage && dnsInstructions.dnsProvider.configured ? <button className="button button--secondary" type="button" onClick={() => void publishDns()} disabled={publishingDns}><ShieldCheck /> {publishingDns ? '正在写入…' : `自动写入 ${dnsInstructions.dnsProvider.provider === 'cloudflare' ? 'Cloudflare' : 'DNS'}`}</button> : null}
+          {canManage && dnsInstructions.routeAutomationConfigured ? <button className="button button--secondary" type="button" onClick={() => void applyDomainRoute()} disabled={applyingRoute}><RefreshCw className={applyingRoute ? 'is-spinning' : undefined} /> {applyingRoute ? '正在修复入口…' : '修复域名入口'}</button> : null}
           {canManage && dnsInstructions.certificateStatus !== 'active' && dnsInstructions.certificateProvider.configured ? <button className="button button--secondary" type="button" onClick={() => void issueCertificate()} disabled={issuingCertificate || dnsInstructions.dnsStatus !== 'verified'}><ShieldCheck /> {issuingCertificate ? '正在启用 HTTPS…' : '启用 HTTPS'}</button> : null}
           <div className="dns-record-grid"><div><span>记录类型</span><strong>{dnsInstructions.type}</strong></div><div><span>主机记录</span><strong>{dnsInstructions.name}</strong><button type="button" onClick={() => { void navigator.clipboard?.writeText(dnsInstructions.name); notify('主机记录已复制') }}><Copy /></button></div><div className="dns-record-value"><span>记录值</span><strong>{dnsInstructions.value}</strong><button type="button" onClick={() => { void navigator.clipboard?.writeText(dnsInstructions.value); notify('TXT 记录值已复制') }}><Copy /></button></div></div>
           <p className="dns-hint">完整查询名称：{dnsInstructions.fullName}<br />DNS 状态：{dnsInstructions.dnsStatus === 'verified' ? '已验证' : '等待验证'} · HTTPS：{dnsInstructions.certificateStatus === 'active' ? '已生效' : '等待签发'}</p>

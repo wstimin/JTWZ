@@ -1251,8 +1251,20 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
         lastVerifiedAt: row.last_verified_at ? String(row.last_verified_at) : undefined,
         dnsProvider: dnsProviderStatus(),
         certificateProvider: certificateProviderStatus(),
+        routeAutomationConfigured: domainAutomationConfigured(),
       },
     })
+    return
+  }
+  const domainRouteMatch = url.pathname.match(/^\/api\/domains\/([^/]+)\/apply-route$/)
+  if (domainRouteMatch && method === 'POST') {
+    const id = decodeURIComponent(domainRouteMatch[1])
+    const row = db.prepare('SELECT hostname FROM domains WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new HttpError(404, '域名不存在')
+    const hostname = String(row.hostname)
+    await configureDomainRoute(hostname)
+    audit(admin.id, 'domain_route_applied', 'domain', id, hostname)
+    sendJson(response, 200, { ok: true, domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(id) as Row) })
     return
   }
   const dnsPublishMatch = url.pathname.match(/^\/api\/domains\/([^/]+)\/publish-dns$/)
@@ -1296,6 +1308,15 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
       throw new HttpError(409, 'TXT 记录已查询到，但记录值不匹配')
     }
     const timestamp = new Date().toISOString()
+    db.prepare("UPDATE domains SET dns_status = 'verified', last_verified_at = ?, status = CASE WHEN status = 'pending' THEN 'active' ELSE status END, updated_at = ? WHERE id = ?")
+      .run(timestamp, timestamp, id)
+    let routeWarning = ''
+    try {
+      await configureDomainRoute(hostname)
+    } catch (error) {
+      routeWarning = error instanceof Error ? error.message : '服务器入口配置失败'
+      audit(admin.id, 'domain_route_failed', 'domain', id, `${hostname} / ${routeWarning}`)
+    }
     let certificateStatus: 'pending' | 'active' | 'error' = 'pending'
     const settings = publicSettings()
     if (settings.autoHttps && certificateProviderStatus().configured) {
@@ -1307,10 +1328,10 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
         certificateStatus = 'error'
       }
     }
-    db.prepare("UPDATE domains SET dns_status = 'verified', certificate_status = ?, last_verified_at = ?, status = CASE WHEN status = 'pending' THEN 'active' ELSE status END, updated_at = ? WHERE id = ?")
-      .run(certificateStatus, timestamp, timestamp, id)
+    db.prepare('UPDATE domains SET certificate_status = ?, updated_at = ? WHERE id = ?')
+      .run(certificateStatus, new Date().toISOString(), id)
     audit(admin.id, 'verify', 'domain', id, hostname)
-    sendJson(response, 200, { domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(id) as Row) })
+    sendJson(response, 200, { domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(id) as Row), routeWarning })
     return
   }
   const certificateIssueMatch = url.pathname.match(/^\/api\/domains\/([^/]+)\/issue-certificate$/)

@@ -388,16 +388,26 @@ EOF
 }
 
 configure_firewall() {
-  [[ "$USE_REVERSE_PROXY" == 'false' ]] || return 0
   if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
-    ufw allow "$API_PORT/tcp" >/dev/null
-    say "UFW 已放行 TCP 端口 $API_PORT。"
+    if [[ "$USE_REVERSE_PROXY" == 'true' ]]; then
+      ufw allow 80/tcp >/dev/null
+      ufw allow 443/tcp >/dev/null
+      say 'UFW 已放行 HTTP/HTTPS 端口 80 和 443。'
+    else
+      ufw allow "$API_PORT/tcp" >/dev/null
+      say "UFW 已放行 TCP 端口 $API_PORT。"
+    fi
   elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port="$API_PORT/tcp" >/dev/null
+    if [[ "$USE_REVERSE_PROXY" == 'true' ]]; then
+      firewall-cmd --permanent --add-service=http >/dev/null
+      firewall-cmd --permanent --add-service=https >/dev/null
+    else
+      firewall-cmd --permanent --add-port="$API_PORT/tcp" >/dev/null
+    fi
     firewall-cmd --reload >/dev/null
-    say "firewalld 已放行 TCP 端口 $API_PORT。"
+    [[ "$USE_REVERSE_PROXY" == 'true' ]] && say 'firewalld 已放行 HTTP/HTTPS 服务。' || say "firewalld 已放行 TCP 端口 $API_PORT。"
   else
-    say "请确认云服务器安全组已放行 TCP 端口 $API_PORT。"
+    [[ "$USE_REVERSE_PROXY" == 'true' ]] && say '请确认云服务器安全组已放行 TCP 端口 80 和 443。' || say "请确认云服务器安全组已放行 TCP 端口 $API_PORT。"
   fi
 }
 
