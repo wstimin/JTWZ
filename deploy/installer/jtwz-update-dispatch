@@ -4,6 +4,7 @@ set -Eeuo pipefail
 APP_DIR="${JTWZ_APP_DIR:-/opt/jtwz}"
 UPDATE_DIR="$APP_DIR/data/updates"
 REQUEST_FILE="$UPDATE_DIR/apply.request"
+LOG_FILE="$UPDATE_DIR/system-update.log"
 UPDATER='/usr/local/bin/jtwz-update'
 
 die() { printf '[JTWZ Update Dispatch][错误] %s\n' "$*" >&2; exit 1; }
@@ -20,6 +21,11 @@ if [[ "${1:-}" == '--apply' ]]; then
   resolved="$(realpath "$artifact")"
   allowed="$(realpath "$UPDATE_DIR")/"
   [[ "$resolved" == "$allowed"* ]] || die '更新包不在受控目录中。'
+  touch "$LOG_FILE"
+  chown root:jtwz "$LOG_FILE" 2>/dev/null || true
+  chmod 640 "$LOG_FILE"
+  printf '\n[%s] 开始应用 %s\n' "$(date -Is)" "$(basename "$resolved")" >> "$LOG_FILE"
+  exec > >(tee -a "$LOG_FILE") 2>&1
   exec "$UPDATER" "$resolved"
 fi
 

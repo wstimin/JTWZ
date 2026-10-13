@@ -241,7 +241,10 @@ write_env() {
     upsert_env PUBLIC_APP_ORIGIN "$PUBLIC_BASE_URL"
     upsert_env ADMIN_APP_ORIGIN "$ADMIN_BASE_URL"
     upsert_env UPDATE_MANIFEST_URL 'https://github.com/wstimin/JTWZ/releases/latest/download/update-manifest.json'
-    [[ -z "$UPDATE_PUBLIC_KEY_B64_VALUE" ]] || upsert_env UPDATE_PUBLIC_KEY_B64 "$UPDATE_PUBLIC_KEY_B64_VALUE"
+    if [[ -n "$UPDATE_PUBLIC_KEY_B64_VALUE" ]]; then
+      remove_multiline_env_key UPDATE_PUBLIC_KEY
+      upsert_env UPDATE_PUBLIC_KEY_B64 "$UPDATE_PUBLIC_KEY_B64_VALUE"
+    fi
     upsert_env UPDATE_APPLY_COMMAND "$UPDATE_APPLY_COMMAND_VALUE"
     upsert_env UPDATE_APPLY_ARGS_JSON "$UPDATE_APPLY_ARGS_JSON_VALUE"
     upsert_env DOMAIN_APPLY_COMMAND "$DOMAIN_APPLY_COMMAND_VALUE"
@@ -294,6 +297,21 @@ upsert_env() {
     index($0, key "=") == 1 { print key "=" value; found = 1; next }
     { print }
     END { if (!found) print key "=" value }
+  ' "$ENV_FILE" > "$temp_file"
+  install -m 600 "$temp_file" "$ENV_FILE"
+  rm -f "$temp_file"
+}
+
+remove_multiline_env_key() {
+  local key="$1" temp_file
+  [[ -f "$ENV_FILE" ]] || return 0
+  temp_file="$(mktemp)"
+  awk -v target="$key" '
+    BEGIN { skipping = 0 }
+    $0 ~ "^" target "=" { skipping = 1; next }
+    skipping && /^[A-Za-z_][A-Za-z0-9_]*=/ { skipping = 0 }
+    skipping { next }
+    { print }
   ' "$ENV_FILE" > "$temp_file"
   install -m 600 "$temp_file" "$ENV_FILE"
   rm -f "$temp_file"

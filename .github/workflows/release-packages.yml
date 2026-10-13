@@ -27,6 +27,28 @@ jobs:
           npm ci
           npm run build
 
+      - name: Verify production-only release payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_DIR="$RUNNER_TEMP/jtwz-release-preflight"
+          mkdir -p "$PACKAGE_DIR"
+          cp -a package.json package-lock.json dist dist-server "$PACKAGE_DIR/"
+          npm --prefix "$PACKAGE_DIR" ci --omit=dev
+          cd "$PACKAGE_DIR"
+          NODE_ENV=production API_HOST=127.0.0.1 API_PORT=18786 DATA_DIR="$RUNNER_TEMP/jtwz-release-data" \
+            ADMIN_USERNAME=admin ADMIN_PASSWORD=release-preflight-password APP_SECRET=release-preflight-secret \
+            ALLOW_LOCAL_STORAGE_IN_PRODUCTION=true node dist-server/index.js > "$RUNNER_TEMP/jtwz-release.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for attempt in {1..50}; do
+            if curl -fsS http://127.0.0.1:18786/api/health >/dev/null; then exit 0; fi
+            if ! kill -0 "$PID" 2>/dev/null; then break; fi
+            sleep 0.2
+          done
+          cat "$RUNNER_TEMP/jtwz-release.log"
+          exit 1
+
       - name: Assemble packages
         shell: bash
         run: |

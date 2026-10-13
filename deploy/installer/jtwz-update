@@ -7,10 +7,13 @@ ARCHIVE="${1:-}"
 STATE_DIR="$APP_DIR/data/updates"
 API_PORT="8787"
 STAGING=''
+NEXT=''
 ROLLBACK=''
 TARGET_DIR="$APP_DIR"
 SWITCHED='false'
 CONFIG_ENV="$APP_DIR/data/config.env"
+SERVICE_USER="${JTWZ_SERVICE_USER:-jtwz}"
+SERVICE_GROUP="${JTWZ_SERVICE_GROUP:-jtwz}"
 
 say() { printf '\n[JTWZ Update] %s\n' "$*"; }
 die() { printf '[JTWZ Update][错误] %s\n' "$*" >&2; exit 1; }
@@ -61,6 +64,23 @@ const payload = { status: process.env.JTWZ_UPDATE_STATUS, detail: process.env.JT
 fs.writeFileSync(`${target}.tmp`, JSON.stringify(payload, null, 2), { mode: 0o600 })
 fs.renameSync(`${target}.tmp`, target)
 NODE
+  if id -u "$SERVICE_USER" >/dev/null 2>&1; then chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR/state.json"; fi
+  chmod 640 "$STATE_DIR/state.json"
+}
+
+sanitize_legacy_public_key() {
+  [[ -f "$CONFIG_ENV" ]] || return 0
+  local temporary="$CONFIG_ENV.sanitize.$$"
+  awk '
+    BEGIN { skipping = 0 }
+    /^UPDATE_PUBLIC_KEY=/ { skipping = 1; next }
+    skipping && /^[A-Za-z_][A-Za-z0-9_]*=/ { skipping = 0 }
+    skipping { next }
+    { print }
+  ' "$CONFIG_ENV" > "$temporary"
+  chown --reference="$CONFIG_ENV" "$temporary"
+  chmod --reference="$CONFIG_ENV" "$temporary"
+  mv -f "$temporary" "$CONFIG_ENV"
 }
 
 verify_signed_artifact
@@ -84,26 +104,44 @@ wait_for_health() {
 }
 
 restore_previous_code() {
-  local item
+  local item failure_detail="${1:-}"
   say '健康检查未通过，正在自动恢复上一版程序。'
   stop_service || true
   for item in package.json package-lock.json dist dist-server node_modules; do
     rm -rf "$TARGET_DIR/$item"
-    [[ -e "$ROLLBACK/$item" ]] && cp -a "$ROLLBACK/$item" "$TARGET_DIR/"
+    [[ -e "$ROLLBACK/$item" ]] && mv "$ROLLBACK/$item" "$TARGET_DIR/"
   done
   for item in jtwzctl jtwz-update jtwz-update-dispatch jtwz-domain jtwz-domain-dispatch; do
     [[ -f "$ROLLBACK/bin/$item" ]] && install -m 755 "$ROLLBACK/bin/$item" "/usr/local/bin/$item"
   done
   start_service
   wait_for_health || true
-  write_state 'rolled_back' '新版本健康检查失败，已恢复上一版程序。'
+  if [[ -n "$failure_detail" ]]; then
+    write_state 'rolled_back' "新版本健康检查失败，已恢复上一版程序。原因：${failure_detail:0:600}" "${VERSION:-}"
+  else
+    write_state 'rolled_back' '新版本健康检查失败，已恢复上一版程序。' "${VERSION:-}"
+  fi
+}
+
+service_failure_detail() {
+  journalctl -u "${SERVICE_NAME}.service" -n 12 --no-pager -o cat 2>/dev/null \
+    | grep -Ev '^(Started|Stopped|Stopping|Scheduled restart job)' \
+    | tail -n 4 \
+    | tr '\n' ' ' \
+    | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' \
+    || true
 }
 
 on_error() {
   local code=$?
   trap - ERR
-  if [[ "$SWITCHED" == 'true' && -n "$ROLLBACK" && -d "$ROLLBACK" ]]; then restore_previous_code; else write_state 'failed' '更新准备阶段失败，现有服务未改动。'; fi
+  if [[ "$SWITCHED" == 'true' && -n "$ROLLBACK" && -d "$ROLLBACK" ]]; then
+    restore_previous_code "$(service_failure_detail)"
+  else
+    write_state 'failed' '更新准备阶段失败，现有服务未改动。请查看更新日志。' "${VERSION:-}"
+  fi
   [[ -n "$STAGING" && -d "$STAGING" ]] && rm -rf "$STAGING"
+  [[ -n "$NEXT" && -d "$NEXT" ]] && rm -rf "$NEXT"
   [[ -n "$ROLLBACK" && -d "$ROLLBACK" ]] && rm -rf "$ROLLBACK"
   exit "$code"
 }
@@ -118,14 +156,28 @@ SOURCE_PACKAGE="$(dirname "$SOURCE_APP")"
 VERSION="$(node -e "process.stdout.write(require(process.argv[1]).version || '')" "$SOURCE_APP/package.json")"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || die '更新包版本号无效。'
 
-NEXT="$STAGING/next"
-mkdir -p "$NEXT"
+NEXT="$(mktemp -d "$STATE_DIR/next.XXXXXX")"
 cp -a "$SOURCE_APP/package.json" "$SOURCE_APP/package-lock.json" "$SOURCE_APP/dist" "$SOURCE_APP/dist-server" "$NEXT/"
 npm --prefix "$NEXT" ci --omit=dev
 
-for item in package.json package-lock.json dist dist-server node_modules; do
-  [[ -e "$TARGET_DIR/$item" ]] && cp -a "$TARGET_DIR/$item" "$ROLLBACK/"
-done
+PREFLIGHT_LOG="$STAGING/production-preflight.log"
+(
+  cd "$NEXT"
+  NODE_ENV=production API_HOST=127.0.0.1 API_PORT=0 DATA_DIR="$STAGING/preflight-data" \
+    ADMIN_USERNAME=update-preflight ADMIN_PASSWORD=update-preflight-password APP_SECRET=update-preflight-secret \
+    ALLOW_LOCAL_STORAGE_IN_PRODUCTION=true node dist-server/index.js > "$PREFLIGHT_LOG" 2>&1
+) &
+PREFLIGHT_PID=$!
+sleep 2
+if ! kill -0 "$PREFLIGHT_PID" >/dev/null 2>&1; then
+  wait "$PREFLIGHT_PID" || true
+  tail -n 12 "$PREFLIGHT_LOG" >&2 || true
+  write_state 'failed' '更新包生产环境预检失败，现有服务未改动。请查看更新日志。' "$VERSION"
+  false
+fi
+kill "$PREFLIGHT_PID" >/dev/null 2>&1 || true
+wait "$PREFLIGHT_PID" 2>/dev/null || true
+
 mkdir -p "$ROLLBACK/bin"
 for item in jtwzctl jtwz-update jtwz-update-dispatch jtwz-domain jtwz-domain-dispatch; do
   [[ -f "/usr/local/bin/$item" ]] && cp -a "/usr/local/bin/$item" "$ROLLBACK/bin/$item"
@@ -135,14 +187,17 @@ write_state 'applying' "正在切换到 v$VERSION。" "$VERSION"
 stop_service
 SWITCHED='true'
 for item in package.json package-lock.json dist dist-server node_modules; do
-  rm -rf "$TARGET_DIR/$item"
-  cp -a "$NEXT/$item" "$TARGET_DIR/"
+  [[ -e "$TARGET_DIR/$item" ]] && mv "$TARGET_DIR/$item" "$ROLLBACK/"
+done
+for item in package.json package-lock.json dist dist-server node_modules; do
+  mv "$NEXT/$item" "$TARGET_DIR/"
 done
 if [[ -f "$SOURCE_PACKAGE/installer/jtwzctl" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwzctl" /usr/local/bin/jtwzctl; fi
 if [[ -f "$SOURCE_PACKAGE/installer/jtwz-update" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwz-update" /usr/local/bin/jtwz-update; fi
 if [[ -f "$SOURCE_PACKAGE/installer/jtwz-update-dispatch" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwz-update-dispatch" /usr/local/bin/jtwz-update-dispatch; fi
 if [[ -f "$SOURCE_PACKAGE/installer/jtwz-domain" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwz-domain" /usr/local/bin/jtwz-domain; fi
 if [[ -f "$SOURCE_PACKAGE/installer/jtwz-domain-dispatch" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwz-domain-dispatch" /usr/local/bin/jtwz-domain-dispatch; fi
+sanitize_legacy_public_key
 if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
   sed -i '/^NoNewPrivileges=true$/d' "/etc/systemd/system/${SERVICE_NAME}.service"
   sed -i "s#^ReadWritePaths=.*#ReadWritePaths=$APP_DIR -/usr/local/bin -/etc/systemd/system -/etc/sudoers.d -/etc/nginx -/etc/letsencrypt -/var/lib/letsencrypt -/var/log/letsencrypt#" "/etc/systemd/system/${SERVICE_NAME}.service"
@@ -182,5 +237,5 @@ wait_for_health
 write_state 'applied' "v$VERSION 已安装，数据库迁移与健康检查通过。" "$VERSION"
 SWITCHED='false'
 trap - ERR
-rm -rf "$STAGING" "$ROLLBACK"
+rm -rf "$STAGING" "$NEXT" "$ROLLBACK"
 say "v$VERSION 更新成功。"
