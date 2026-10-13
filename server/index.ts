@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { resolveTxt } from 'node:dns/promises'
+import { resolve4, resolve6, resolveTxt } from 'node:dns/promises'
 import { basename, extname, resolve, sep } from 'node:path'
 import { hashPassword, hashToken, verifyPassword } from './auth.js'
 import { config, normalizeAdminBasePath } from './config.js'
@@ -26,6 +26,21 @@ import type { AuthenticatedRequest } from './securityTypes.js'
 import { validatePackageFile, validatePackageMetadata } from './services/uploadValidation.js'
 
 type Row = Record<string, unknown>
+
+async function domainRoutingStatus(hostname: string) {
+  const [ipv4, ipv6] = await Promise.all([
+    resolve4(hostname).catch(() => [] as string[]),
+    resolve6(hostname).catch(() => [] as string[]),
+  ])
+  return {
+    type: 'A' as const,
+    name: '@',
+    fullName: hostname,
+    value: config.publicAddress,
+    addresses: [...ipv4, ...ipv6],
+    ready: ipv4.length > 0 || ipv6.length > 0,
+  }
+}
 const adminRequestBuckets = new Map<string, { count: number; resetAt: number }>()
 let activeAdminBasePath = config.adminBasePath
 const disabledAdminBasePaths = new Set(config.disabledAdminBasePaths.filter((path) => path !== activeAdminBasePath))
@@ -215,6 +230,10 @@ async function runCertificateOperationTask(taskId: string, adminId: string | nul
   const domain = db.prepare('SELECT hostname, dns_status FROM domains WHERE id = ?').get(domainId) as Row | undefined
   if (!domain) throw new HttpError(404, '域名不存在')
   if (String(domain.dns_status) !== 'verified') throw new HttpError(409, '请先完成 DNS 所有权验证')
+  if (certificateProviderStatus().provider === 'certbot') {
+    const routing = await domainRoutingStatus(String(domain.hostname))
+    if (!routing.ready) throw new HttpError(409, `域名尚未解析到服务器。请先添加 A 记录：@ → ${routing.value || '服务器公网 IP'}`)
+  }
   updateTask(taskId, { status: 'running', progress: 15, message: '正在连接证书服务商', log: { level: 'info', message: `开始处理 ${String(domain.hostname)} 的证书` } })
   try {
     const certificate = await issueManagedCertificate(domainId, String(domain.hostname), certificateId)
@@ -1148,8 +1167,16 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     db.prepare(`UPDATE domains SET mode = ?, target = ?, status = ?, redirect_code = ?, preserve_path = ?,
       preserve_query = ?, force_https = ?, updated_at = ? WHERE id = ?`)
       .run(mode, target, status, redirectCode, preservePath, preserveQuery, forceHttps, new Date().toISOString(), id)
+    let routeWarning = ''
+    try {
+      if (status === 'active') await configureDomainRoute(String(current.hostname))
+      else await removeDomainRoute(String(current.hostname))
+    } catch (error) {
+      routeWarning = error instanceof Error ? error.message : '服务器入口配置失败'
+      audit(admin.id, 'domain_route_failed', 'domain', id, `${String(current.hostname)} / ${routeWarning}`)
+    }
     audit(admin.id, 'update', 'domain', id, `${String(current.hostname)} → ${target}`)
-    sendJson(response, 200, { domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(id) as Row) })
+    sendJson(response, 200, { domain: mapDomain(db.prepare('SELECT * FROM domains WHERE id = ?').get(id) as Row), routeWarning })
     return
   }
   if (domainMatch && method === 'DELETE') {
@@ -1250,6 +1277,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     const id = decodeURIComponent(dnsInstructionsMatch[1])
     const row = db.prepare('SELECT hostname, verification_token, dns_status, certificate_status, last_verified_at FROM domains WHERE id = ?').get(id) as Row | undefined
     if (!row) throw new HttpError(404, '域名不存在')
+    const routing = await domainRoutingStatus(String(row.hostname))
     sendJson(response, 200, {
       instructions: {
         type: 'TXT',
@@ -1262,6 +1290,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
         dnsProvider: dnsProviderStatus(),
         certificateProvider: certificateProviderStatus(),
         routeAutomationConfigured: domainAutomationConfigured(),
+        routing,
       },
     })
     return
@@ -1327,9 +1356,11 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
       routeWarning = error instanceof Error ? error.message : '服务器入口配置失败'
       audit(admin.id, 'domain_route_failed', 'domain', id, `${hostname} / ${routeWarning}`)
     }
+    const routing = await domainRoutingStatus(hostname)
+    if (!routing.ready) routeWarning = `所有权已验证，但域名尚未解析到服务器。请添加 A 记录：@ → ${routing.value || '服务器公网 IP'}`
     let certificateStatus: 'pending' | 'active' | 'error' = 'pending'
     const settings = publicSettings()
-    if (settings.autoHttps && certificateProviderStatus().configured) {
+    if (settings.autoHttps && certificateProviderStatus().configured && (certificateProviderStatus().provider !== 'certbot' || routing.ready)) {
       try {
         const task = createTask({ kind: 'certificate_issue', label: `签发 ${hostname} 的 HTTPS 证书`, entityType: 'domain', entityId: id, input: { domainId: id }, retryable: true })
         await runCertificateOperationTask(task.id, admin.id)

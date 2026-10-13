@@ -96,6 +96,7 @@ export const config = {
   adminAppOrigin: process.env.ADMIN_APP_ORIGIN || 'http://127.0.0.1:4174',
   allowedOrigins,
   appHost: process.env.APP_HOST || '127.0.0.1',
+  publicAddress: process.env.PUBLIC_ADDRESS || process.env.PUBLIC_DOMAIN || process.env.APP_HOST || '',
   adminUsername: process.env.ADMIN_USERNAME || 'admin',
   adminPassword: configuredPassword || 'local-development-password',
   appSecret: configuredSecret || 'jtwz-development-secret-change-before-production',
