@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+APP_DIR="${JTWZ_APP_DIR:-/opt/jtwz}"
+UPDATE_DIR="$APP_DIR/data/updates"
+REQUEST_FILE="$UPDATE_DIR/apply.request"
+UPDATER='/usr/local/bin/jtwz-update'
+
+die() { printf '[JTWZ Update Dispatch][错误] %s\n' "$*" >&2; exit 1; }
+
+install -d -m 750 "$UPDATE_DIR"
+
+if [[ "${1:-}" == '--apply' ]]; then
+  [[ "$(id -u)" == 0 ]] || die '更新应用服务必须由 root 运行。'
+  [[ -f "$REQUEST_FILE" ]] || exit 0
+  IFS= read -r artifact < "$REQUEST_FILE"
+  rm -f "$REQUEST_FILE"
+  [[ -x "$UPDATER" ]] || die '缺少安全更新执行器。'
+  [[ -f "$artifact" ]] || die '更新包不存在。'
+  resolved="$(realpath "$artifact")"
+  allowed="$(realpath "$UPDATE_DIR")/"
+  [[ "$resolved" == "$allowed"* ]] || die '更新包不在受控目录中。'
+  exec "$UPDATER" "$resolved"
+fi
+
+artifact="${1:-}"
+[[ -n "$artifact" && -f "$artifact" ]] || die '请提供已经下载并校验的更新包。'
+resolved="$(realpath "$artifact")"
+allowed="$(realpath "$UPDATE_DIR")/"
+[[ "$resolved" == "$allowed"* ]] || die '更新包不在受控目录中。'
+temporary="$REQUEST_FILE.$$.tmp"
+umask 027
+printf '%s\n' "$resolved" > "$temporary"
+mv -f "$temporary" "$REQUEST_FILE"
+printf '[JTWZ Update Dispatch] 更新请求已提交。\n'

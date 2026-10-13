@@ -54,6 +54,7 @@ jobs:
           find deploy -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
           bash -n deploy/installer/jtwzctl
           bash -n deploy/installer/jtwz-update
+          bash -n deploy/installer/jtwz-update-dispatch
           bash -n deploy/installer/jtwz-domain
           bash tests/one-click-launcher.sh
       - name: Validate Compose manifests

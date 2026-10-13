@@ -1052,6 +1052,16 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     sendJson(response, 201, { backup })
     return
   }
+  const backupDeleteMatch = url.pathname.match(/^\/api\/admin\/backups\/([^/]+)$/)
+  if (backupDeleteMatch && method === 'DELETE') {
+    const fileName = decodeURIComponent(backupDeleteMatch[1])
+    let filePath: string
+    try { filePath = backupFilePath(fileName) } catch { throw new HttpError(404, '备份文件不存在') }
+    rmSync(filePath, { force: true })
+    audit(admin.id, 'backup_delete', 'database', '1', fileName)
+    sendJson(response, 200, { ok: true, fileName })
+    return
+  }
   const backupDownloadMatch = url.pathname.match(/^\/api\/admin\/backups\/([^/]+)\/download$/)
   if (backupDownloadMatch && method === 'GET') {
     let filePath: string

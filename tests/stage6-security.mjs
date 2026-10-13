@@ -76,6 +76,13 @@ try {
   assert.equal(systemConfig.response.status, 200, systemConfig.payload.error)
   assert.equal(systemConfig.payload.config.dnsWebhookUrl, 'http://127.0.0.1:19999/jtwz')
   assert.match(readFileSync(envPath, 'utf8'), /DNS_WEBHOOK_URL=http:\/\/127\.0\.0\.1:19999\/jtwz/)
+  const createdBackup = await api(owner, '/api/admin/backups/create', 'POST')
+  assert.equal(createdBackup.response.status, 201, createdBackup.payload.error)
+  const backupName = createdBackup.payload.backup.fileName
+  const deletedBackup = await api(owner, `/api/admin/backups/${encodeURIComponent(backupName)}`, 'DELETE')
+  assert.equal(deletedBackup.response.status, 200, deletedBackup.payload.error)
+  const remainingBackups = await api(owner, '/api/admin/backups')
+  assert.equal(remainingBackups.payload.backups.some((item) => item.fileName === backupName), false)
   const noCsrf = await fetch(`${base}/api/security/sessions/revoke-others`, { method: 'POST', headers: { Cookie: owner.cookie } })
   assert.equal(noCsrf.status, 403)
 
@@ -114,6 +121,7 @@ try {
 
   const installer = readFileSync(resolve(root, 'deploy/installer/install.sh'), 'utf8')
   const updater = readFileSync(resolve(root, 'deploy/installer/jtwz-update'), 'utf8')
+  const updateDispatcher = readFileSync(resolve(root, 'deploy/installer/jtwz-update-dispatch'), 'utf8')
   const domainExecutor = readFileSync(resolve(root, 'deploy/installer/jtwz-domain'), 'utf8')
   assert.match(installer, /User=jtwz/)
   assert.match(installer, /ProtectSystem=strict/)
@@ -123,6 +131,8 @@ try {
   assert.match(installer, /ENV_FILE="\$APP_DIR\/data\/config\.env"/)
   assert.match(installer, /LEGACY_ENV_FILE="\$APP_DIR\/\.env"/)
   assert.match(updater, /Ed25519 签名复核失败/)
+  assert.match(updateDispatcher, /apply\.request/)
+  assert.match(installer, /jtwz-update\.path/)
   assert.match(domainExecutor, /certbot --nginx --non-interactive/)
 
   console.log('stage6: RBAC, CSRF, request IDs, 2FA, sessions, login alerts, audit metadata and low-privilege deployment passed')

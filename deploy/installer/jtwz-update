@@ -91,7 +91,7 @@ restore_previous_code() {
     rm -rf "$TARGET_DIR/$item"
     [[ -e "$ROLLBACK/$item" ]] && cp -a "$ROLLBACK/$item" "$TARGET_DIR/"
   done
-  for item in jtwzctl jtwz-update jtwz-domain; do
+  for item in jtwzctl jtwz-update jtwz-update-dispatch jtwz-domain; do
     [[ -f "$ROLLBACK/bin/$item" ]] && install -m 755 "$ROLLBACK/bin/$item" "/usr/local/bin/$item"
   done
   start_service
@@ -127,7 +127,7 @@ for item in package.json package-lock.json dist dist-server node_modules; do
   [[ -e "$TARGET_DIR/$item" ]] && cp -a "$TARGET_DIR/$item" "$ROLLBACK/"
 done
 mkdir -p "$ROLLBACK/bin"
-for item in jtwzctl jtwz-update jtwz-domain; do
+for item in jtwzctl jtwz-update jtwz-update-dispatch jtwz-domain; do
   [[ -f "/usr/local/bin/$item" ]] && cp -a "/usr/local/bin/$item" "$ROLLBACK/bin/$item"
 done
 
@@ -140,13 +140,14 @@ for item in package.json package-lock.json dist dist-server node_modules; do
 done
 if [[ -f "$SOURCE_PACKAGE/installer/jtwzctl" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwzctl" /usr/local/bin/jtwzctl; fi
 if [[ -f "$SOURCE_PACKAGE/installer/jtwz-update" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwz-update" /usr/local/bin/jtwz-update; fi
+if [[ -f "$SOURCE_PACKAGE/installer/jtwz-update-dispatch" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwz-update-dispatch" /usr/local/bin/jtwz-update-dispatch; fi
 if [[ -f "$SOURCE_PACKAGE/installer/jtwz-domain" ]]; then install -m 755 "$SOURCE_PACKAGE/installer/jtwz-domain" /usr/local/bin/jtwz-domain; fi
 if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
   sed -i '/^NoNewPrivileges=true$/d' "/etc/systemd/system/${SERVICE_NAME}.service"
   sed -i "s#^ReadWritePaths=.*#ReadWritePaths=$APP_DIR -/usr/local/bin -/etc/systemd/system -/etc/sudoers.d -/etc/nginx -/etc/letsencrypt -/var/lib/letsencrypt -/var/log/letsencrypt#" "/etc/systemd/system/${SERVICE_NAME}.service"
 fi
 if id -u jtwz >/dev/null 2>&1 && [[ -x /usr/local/bin/jtwz-domain ]]; then
-  printf 'jtwz ALL=(root) NOPASSWD: /usr/local/bin/jtwz-update *\njtwz ALL=(root) NOPASSWD: /usr/local/bin/jtwz-domain *\n' > /etc/sudoers.d/jtwz-update
+  printf 'jtwz ALL=(root) NOPASSWD: /usr/local/bin/jtwz-domain *\n' > /etc/sudoers.d/jtwz-update
   chmod 440 /etc/sudoers.d/jtwz-update
   visudo -cf /etc/sudoers.d/jtwz-update >/dev/null
 fi

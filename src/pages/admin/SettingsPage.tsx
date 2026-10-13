@@ -173,6 +173,17 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
     }
   }
 
+  async function deleteBackup(fileName: string) {
+    if (!await confirm({ title: '删除服务器备份', message: `确定删除 ${fileName} 吗？删除后无法恢复。`, confirmLabel: '删除备份', tone: 'danger' })) return
+    try {
+      await apiJson(`/api/admin/backups/${encodeURIComponent(fileName)}`, 'DELETE')
+      setBackups((current) => current.filter((backup) => backup.fileName !== fileName))
+      notify('服务器备份已删除', 'info')
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : '备份删除失败', 'info')
+    }
+  }
+
   async function testNotifications() {
     try {
       const result = await apiJson<{ configured: boolean }>('/api/alerts/test', 'POST')
@@ -243,7 +254,7 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
   }
 
   async function installSystemUpdate() {
-    if (!systemUpdate?.updateAvailable || !await confirm({ title: '安装系统更新', message: `即将备份当前网站并更新到 ${systemUpdate.latestVersion}，确定继续吗？`, confirmLabel: '备份并更新', tone: 'warning' })) return
+    if (!systemUpdate?.updateAvailable || !await confirm({ title: '安装系统更新', message: `即将更新到 ${systemUpdate.latestVersion}。系统会自动创建一个可删除的回滚点，确定继续吗？`, confirmLabel: '安装更新', tone: 'warning' })) return
     setUpdateLoading(true)
     setUpdateProgress({ value: 12, label: '正在创建回滚备份并下载更新包…', status: 'running' })
     try {
@@ -428,7 +439,7 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
         </section> : null}
 
         {activeSection === 'maintenance' ? <section id="settings-maintenance" className="panel settings-panel">
-          <div className="settings-heading"><div><span className="overline">System update</span><h2>系统版本与更新</h2><p>{systemUpdate?.configured ? `当前版本 ${systemUpdate.currentVersion}，${systemUpdate.updateAvailable ? `已验证签名，可更新到 ${systemUpdate.latestVersion}` : '已是最新版本'}。` : `当前版本 ${systemUpdate?.currentVersion || '读取中'}；${systemUpdate?.configurationError || '需要配置更新清单和 Ed25519 公钥'}。`}</p></div><div className="toolbar-actions"><button className="button button--secondary" type="button" onClick={() => void checkSystemUpdate()} disabled={updateLoading}><RefreshCw className={updateLoading ? 'is-spinning' : undefined} /> {updateLoading ? '检测中…' : '检测新版本'}</button>{systemUpdate?.updateAvailable ? <button className="button button--primary" type="button" onClick={() => void installSystemUpdate()} disabled={updateLoading}><Download /> 备份并更新</button> : null}</div></div>
+          <div className="settings-heading"><div><span className="overline">System update</span><h2>系统版本与更新</h2><p>{systemUpdate?.configured ? `当前版本 ${systemUpdate.currentVersion}，${systemUpdate.updateAvailable ? `已验证签名，可更新到 ${systemUpdate.latestVersion}` : '已是最新版本'}。安装前会自动创建回滚点，更新成功后可在下方删除。` : `当前版本 ${systemUpdate?.currentVersion || '读取中'}；${systemUpdate?.configurationError || '需要配置更新清单和 Ed25519 公钥'}。`}</p></div><div className="toolbar-actions"><button className="button button--secondary" type="button" onClick={() => void checkSystemUpdate()} disabled={updateLoading}><RefreshCw className={updateLoading ? 'is-spinning' : undefined} /> {updateLoading ? '检测中…' : '检测新版本'}</button>{systemUpdate?.updateAvailable ? <button className="button button--primary" type="button" onClick={() => void installSystemUpdate()} disabled={updateLoading}><Download /> 安装更新</button> : null}</div></div>
           {updateProgress ? <div className={`system-update-progress is-${updateProgress.status}`} role="status" aria-live="polite"><div className="system-update-progress__meta"><strong>{updateProgress.label}</strong><span>{updateProgress.value}%</span></div><div className="system-update-progress__track"><i style={{ width: `${updateProgress.value}%` }} /></div><small>{updateProgress.status === 'running' ? '请保持当前页面打开，服务重启期间页面可能短暂无法访问。' : updateProgress.status === 'success' ? '更新完成后页面会自动重新加载。' : '请根据提示处理后重新检测更新。'}</small></div> : null}
           {systemUpdate?.manifest?.notes ? <div className="settings-saved-note"><strong>v{systemUpdate.latestVersion}</strong><span>{systemUpdate.manifest.notes}</span></div> : null}
           {systemUpdate?.state?.status ? <div className="settings-saved-note"><Check /><span>最近更新状态：{String(systemUpdate.state.status)}{systemUpdate.state.detail ? ` · ${String(systemUpdate.state.detail)}` : ''}</span></div> : null}
@@ -437,7 +448,7 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
           <div className="toolbar-actions"><button className="button button--secondary" type="button" onClick={() => void exportBackup()}><Download /> 生成并下载完整备份</button><button className="button button--secondary" type="button" onClick={() => void createScheduledBackup()}><Database /> 仅创建服务器备份</button><label className="button button--secondary"><UploadCloud /> {importing ? '恢复中…' : '上传迁移包并恢复'}<input type="file" accept=".jtwz-backup,.aurelia-backup,application/gzip,application/octet-stream" onChange={(event) => void importBackup(event)} hidden disabled={importing} /></label></div>
           <div className="settings-saved-note"><ShieldCheck /> 迁移包含账号哈希和运行密钥，请像服务器凭据一样安全保管。</div>
           <div className="settings-saved-note">当前保留 {backups.length} 个自动备份文件，由 `BACKUP_INTERVAL_HOURS` 和 `BACKUP_RETENTION_DAYS` 控制。</div>
-          {backups.slice(0, 5).map((backup) => <div className="settings-saved-note" key={backup.fileName}><Check /> <span>{backup.fileName} · {(backup.byteSize / 1024).toFixed(1)} KB · {new Date(backup.createdAt).toLocaleString('zh-CN')}</span><a className="text-link" href={apiUrl(`/api/admin/backups/${encodeURIComponent(backup.fileName)}/download`)}>下载</a></div>)}
+          {backups.map((backup) => <div className="settings-saved-note" key={backup.fileName}><Check /> <span>{backup.fileName} · {(backup.byteSize / 1024).toFixed(1)} KB · {new Date(backup.createdAt).toLocaleString('zh-CN')}</span><a className="text-link" href={apiUrl(`/api/admin/backups/${encodeURIComponent(backup.fileName)}/download`)}>下载</a><button className="text-link" type="button" onClick={() => void deleteBackup(backup.fileName)}><Trash2 /> 删除</button></div>)}
           {!backups.length ? <div className="settings-saved-note">暂无自动备份文件。</div> : null}
           <div className="health-panel"><div className="settings-heading"><div><span className="overline">System readiness</span><h3>系统健康检查</h3><p>{health ? `最近检查：${new Date(health.checkedAt).toLocaleString('zh-CN')}` : '检查数据库、存储、证书和备份能力。'}</p></div><button className="button button--secondary button--small" type="button" onClick={() => void refreshHealth()} disabled={healthLoading}><RefreshCw className={healthLoading ? 'is-spinning' : undefined} /> {healthLoading ? '检查中…' : '重新检查'}</button></div>{health ? <div className="health-check-grid">{health.checks.map((check) => <div className="health-check" key={check.id}><span data-status={check.status}>{check.status === 'ok' ? '正常' : check.status === 'warning' ? '注意' : '异常'}</span><strong>{check.label}</strong><small>{check.detail}</small></div>)}</div> : null}</div>
         </section> : null}
