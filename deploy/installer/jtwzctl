@@ -4,7 +4,7 @@ set -Eeuo pipefail
 APP_DIR="${JTWZ_APP_DIR:-/opt/jtwz}"
 ENV_FILE="$APP_DIR/.env"
 SERVICE_NAME="jtwz"
-API_URL="${JTWZ_API_URL:-http://127.0.0.1:8787}"
+API_URL="${JTWZ_API_URL:-}"
 COOKIE_FILE="${TMPDIR:-/tmp}/jtwzctl-$$.cookie"
 trap 'rm -f "$COOKIE_FILE"' EXIT
 
@@ -14,7 +14,24 @@ need() { command -v "$1" >/dev/null || die "缺少命令：$1"; }
 need curl
 
 env_value() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tail -n 1; }
+[[ -n "$API_URL" ]] || API_URL="http://127.0.0.1:$(env_value API_PORT)"
+[[ "$API_URL" != 'http://127.0.0.1:' ]] || API_URL='http://127.0.0.1:8787'
 restart_service() { if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then systemctl restart "$SERVICE_NAME"; elif command -v docker >/dev/null && [[ -f "$APP_DIR/docker-compose.yml" ]]; then (cd "$APP_DIR" && docker compose restart); fi; }
+
+access_urls() {
+  local public_url admin_url address port bind_host host
+  public_url="$(env_value PUBLIC_URL)"
+  admin_url="$(env_value ADMIN_LOGIN_URL)"
+  if [[ -z "$public_url" ]]; then
+    address="$(env_value PUBLIC_ADDRESS)"; [[ -n "$address" ]] || address="$(env_value PUBLIC_DOMAIN)"
+    port="$(env_value API_PORT)"; port="${port:-8787}"
+    bind_host="$(env_value API_HOST)"
+    host="$address"; [[ "$host" == *:* ]] && host="[$host]"
+    if [[ "$bind_host" == '0.0.0.0' || "$bind_host" == '::' ]]; then public_url="http://$host:$port"; else public_url="http://$host"; fi
+  fi
+  [[ -n "$admin_url" ]] || admin_url="$public_url/admin/login"
+  printf '公开首页：%s/\n管理登录：%s\n' "${public_url%/}" "$admin_url"
+}
 
 api_login() {
   [[ -f "$ENV_FILE" ]] || die "未找到 $ENV_FILE"
@@ -213,7 +230,10 @@ status() {
   say '系统信息'; uname -a; printf 'Node: '; node --version 2>/dev/null || printf '未安装\n'; printf '磁盘: '; df -h "$APP_DIR" | tail -n 1
   if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then systemctl --no-pager --full status "$SERVICE_NAME" || true; elif command -v docker >/dev/null && [[ -f "$APP_DIR/docker-compose.yml" ]]; then (cd "$APP_DIR" && docker compose ps); fi
   curl -fsS "$API_URL/api/health" 2>/dev/null | pretty_json || say 'API 暂不可用。'
-  [[ -f "$ENV_FILE" ]] && say "公开域名：$(env_value PUBLIC_DOMAIN) / 管理域名：$(env_value ADMIN_DOMAIN)"
+  if [[ -f "$ENV_FILE" ]]; then
+    say '访问地址'
+    access_urls
+  fi
 }
 
 menu() {

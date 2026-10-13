@@ -18,6 +18,15 @@ bash <(curl -fsSL -H 'Accept: application/vnd.github.raw' 'https://api.github.co
 
 脚本会自动识别服务器公网 IPv4（失败时再提示手动输入公网 IP 或域名），生成生产配置并安装服务。它不会把 `127.0.0.1`、`192.168.x.x`、`10.x.x.x` 等内网地址作为访问地址。安装完成后使用：
 
+没有域名时，服务直接监听公网端口 `8787`，安装完成会显示完整地址：
+
+```text
+公开首页：http://公网IP:8787/
+管理登录：http://公网IP:8787/admin/login
+```
+
+如果云服务器启用了安全组，需要放行 TCP `8787`。使用域名和 Nginx 反向代理时则使用标准的 HTTP/HTTPS 端口。
+
 ```bash
 sudo jt
 ```

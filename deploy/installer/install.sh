@@ -9,6 +9,11 @@ APP_DIR="${JTWZ_APP_DIR:-/opt/jtwz}"
 SERVICE_NAME="jtwz"
 ENV_FILE="$APP_DIR/.env"
 TARGET_DIR="$APP_DIR"
+API_PORT="${JTWZ_API_PORT:-8787}"
+API_BIND_HOST='127.0.0.1'
+USE_REVERSE_PROXY='false'
+PUBLIC_BASE_URL=''
+ADMIN_BASE_URL=''
 [[ -d "$SOURCE_DIR" ]] || SOURCE_DIR="$(cd -- "$PACKAGE_DIR/.." && pwd)"
 
 say() { printf '\n[JTWZ] %s\n' "$*"; }
@@ -81,6 +86,35 @@ origin_host() {
   [[ "$1" == *:* ]] && printf '[%s]' "$1" || printf '%s' "$1"
 }
 
+is_ip_address() {
+  [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$1" == *:* ]]
+}
+
+select_access_mode() {
+  local public_host admin_host
+  public_host="$(origin_host "$PUBLIC_DOMAIN")"
+  admin_host="$(origin_host "$ADMIN_DOMAIN")"
+
+  if [[ "$PANEL" != 'standalone' ]]; then
+    USE_REVERSE_PROXY='true'
+  elif ! is_ip_address "$PUBLIC_DOMAIN" && command -v nginx >/dev/null; then
+    USE_REVERSE_PROXY='true'
+  else
+    USE_REVERSE_PROXY='false'
+  fi
+
+  if [[ "$USE_REVERSE_PROXY" == 'true' ]]; then
+    API_BIND_HOST='127.0.0.1'
+    [[ "$PANEL" == '1panel' ]] && API_BIND_HOST='0.0.0.0'
+    PUBLIC_BASE_URL="http://$public_host"
+    ADMIN_BASE_URL="http://$admin_host"
+  else
+    API_BIND_HOST='0.0.0.0'
+    PUBLIC_BASE_URL="http://$public_host:$API_PORT"
+    ADMIN_BASE_URL="http://$admin_host:$API_PORT"
+  fi
+}
+
 [[ "$(id -u)" == 0 ]] || die '请使用 root 执行安装。'
 command -v curl >/dev/null || die '缺少 curl，请先安装后重试。'
 command -v openssl >/dev/null || die '缺少 openssl，请先安装后重试。'
@@ -131,24 +165,20 @@ load_existing_env() {
 
 write_env() {
   install -d -m 750 "$APP_DIR/data" "$APP_DIR/data/backups" "$APP_DIR/data/storage" "$APP_DIR/data/site-releases" "$APP_DIR/data/temp" "$APP_DIR/data/brand-assets" "$APP_DIR/data/updates"
-  local public_host admin_host public_origin admin_origin
-  public_host="$(origin_host "$PUBLIC_DOMAIN")"
-  admin_host="$(origin_host "$ADMIN_DOMAIN")"
-  public_origin="http://$public_host"
-  admin_origin="http://$admin_host"
   cat > "$ENV_FILE" <<EOF
 NODE_ENV=production
-# API 仅供本机反向代理访问；公网入口使用自动识别/手动确认的地址。
-API_HOST=127.0.0.1
-API_PORT=8787
-APP_HOST=127.0.0.1
+API_HOST=$API_BIND_HOST
+API_PORT=$API_PORT
+APP_HOST=$API_BIND_HOST
 PUBLIC_ADDRESS=$PUBLIC_DOMAIN
 ADMIN_ADDRESS=$ADMIN_DOMAIN
 PUBLIC_DOMAIN=$PUBLIC_DOMAIN
 ADMIN_DOMAIN=$ADMIN_DOMAIN
-APP_ORIGIN=$public_origin
-PUBLIC_APP_ORIGIN=$public_origin
-ADMIN_APP_ORIGIN=$admin_origin
+PUBLIC_URL=$PUBLIC_BASE_URL
+ADMIN_LOGIN_URL=$ADMIN_BASE_URL/admin/login
+APP_ORIGIN=$PUBLIC_BASE_URL
+PUBLIC_APP_ORIGIN=$PUBLIC_BASE_URL
+ADMIN_APP_ORIGIN=$ADMIN_BASE_URL
 ADMIN_USERNAME=$ADMIN_USERNAME
 ADMIN_PASSWORD=$ADMIN_PASSWORD
 APP_SECRET=$APP_SECRET
@@ -170,7 +200,7 @@ install_application() {
   install -d -m 755 "$TARGET_DIR"
   cp -a "$SOURCE_DIR"/. "$TARGET_DIR"/
   if [[ "$PANEL" != '1panel' ]]; then
-    if [[ -f "$TARGET_DIR/dist-server/index.js" ]]; then
+    if [[ -f "$SOURCE_DIR/dist-server/index.js" ]]; then
       if [[ -f "$TARGET_DIR/package-lock.json" ]]; then npm --prefix "$TARGET_DIR" ci --omit=dev; else npm --prefix "$TARGET_DIR" install --omit=dev; fi
     else
       if [[ -f "$TARGET_DIR/package-lock.json" ]]; then npm --prefix "$TARGET_DIR" ci; else npm --prefix "$TARGET_DIR" install; fi
@@ -202,27 +232,56 @@ User=root
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now "$SERVICE_NAME"
+  systemctl enable "$SERVICE_NAME"
+  systemctl restart "$SERVICE_NAME"
 }
 
 write_nginx() {
-  command -v nginx >/dev/null || return 0
+  [[ "$USE_REVERSE_PROXY" == 'true' && "$PANEL" != '1panel' ]] || return 0
+  command -v nginx >/dev/null || die '当前配置需要 Nginx 反向代理，但服务器未安装 Nginx。'
   local domain="${PUBLIC_DOMAIN:-_}" admin_domain="${ADMIN_DOMAIN:-$PUBLIC_DOMAIN}"
   [[ "$domain" == *:* ]] && domain='_'
   mkdir -p /etc/nginx/conf.d
   cat > /etc/nginx/conf.d/jtwz.conf <<EOF
 server {
   listen 80;
-  server_name $domain;
+  server_name $domain $admin_domain;
   client_max_body_size 2g;
-  location /api/ { proxy_pass http://127.0.0.1:8787; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header X-Real-IP \$remote_addr; proxy_request_buffering off; }
-  location /preview/ { proxy_pass http://127.0.0.1:8787; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header X-Real-IP \$remote_addr; }
+  location /api/ { proxy_pass http://127.0.0.1:$API_PORT; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header X-Real-IP \$remote_addr; proxy_request_buffering off; }
+  location /preview/ { proxy_pass http://127.0.0.1:$API_PORT; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header X-Real-IP \$remote_addr; }
   location /admin { root $APP_DIR/dist; add_header X-Robots-Tag "noindex, nofollow, noarchive" always; try_files \$uri \$uri/ /admin/index.html; }
   location / { root $APP_DIR/dist/public; try_files \$uri \$uri/ /index.html; }
 }
 EOF
   nginx -t && systemctl reload nginx
   say "Nginx 已配置：$domain（管理入口：$admin_domain/admin/login）"
+}
+
+configure_firewall() {
+  [[ "$USE_REVERSE_PROXY" == 'false' ]] || return 0
+  if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw allow "$API_PORT/tcp" >/dev/null
+    say "UFW 已放行 TCP 端口 $API_PORT。"
+  elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="$API_PORT/tcp" >/dev/null
+    firewall-cmd --reload >/dev/null
+    say "firewalld 已放行 TCP 端口 $API_PORT。"
+  else
+    say "请确认云服务器安全组已放行 TCP 端口 $API_PORT。"
+  fi
+}
+
+verify_service() {
+  local attempt
+  for attempt in {1..20}; do
+    if curl -fsS "http://127.0.0.1:$API_PORT/api/health" >/dev/null 2>&1; then
+      say '服务健康检查通过。'
+      return 0
+    fi
+    sleep 1
+  done
+  journalctl -u "$SERVICE_NAME" --no-pager -n 50 >&2 || true
+  die "服务未能在 127.0.0.1:$API_PORT 正常启动，请根据上方日志检查。"
 }
 
 install_panel_runtime() {
@@ -234,6 +293,8 @@ install_panel_runtime() {
   else
     write_systemd
     write_nginx
+    configure_firewall
+    verify_service
   fi
 }
 
@@ -243,6 +304,7 @@ main() {
   if [[ -f "$ENV_FILE" && -s "$ENV_FILE" ]]; then load_existing_env; else prompt_settings; fi
   validate_public_address "$PUBLIC_DOMAIN"
   validate_public_address "$ADMIN_DOMAIN"
+  select_access_mode
   install_application
   install_panel_runtime
   if [[ -f "$PACKAGE_DIR/jtwzctl" ]]; then
@@ -257,9 +319,11 @@ main() {
     die '安装包缺少 jtwzctl 管理脚本。'
   fi
   say '安装完成。'
-  say "查看状态：jtwzctl status"
-  say "交互管理：jtwzctl menu"
-  [[ -n "${PUBLIC_DOMAIN:-}" ]] && say "公开地址：http://$(origin_host "$PUBLIC_DOMAIN")"
+  say "公开首页：$PUBLIC_BASE_URL/"
+  say "管理登录：$ADMIN_BASE_URL/admin/login"
+  say '交互管理：jt'
+  say '查看状态：jt status'
+  [[ "$USE_REVERSE_PROXY" == 'false' ]] && say "如果外网无法访问，请在云厂商安全组中放行 TCP 端口 $API_PORT。"
 }
 
 main "$@"

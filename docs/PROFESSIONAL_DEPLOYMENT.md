@@ -42,6 +42,8 @@ bash <(curl -fsSL -H 'Accept: application/vnd.github.raw' 'https://api.github.co
 
 也可以下载 `jtwz-one-click-vX.Y.Z.tar.gz` 后执行 `sudo ./install.sh`。安装器会从多个外部服务自动识别公网 IP，显示结果并允许改填公网域名；识别失败才要求手动输入。它拒绝回环、私网、链路本地和 CGNAT 地址。安装完成后使用 `sudo jt` 调出交互菜单。
 
+未填写域名、直接使用公网 IP 时，服务对外监听 TCP `8787`，完整管理地址为 `http://公网IP:8787/admin/login`。安装器会处理 UFW/firewalld 并执行健康检查；云平台安全组需要单独放行 TCP `8787`。
+
 ### 宝塔
 
 ```bash
