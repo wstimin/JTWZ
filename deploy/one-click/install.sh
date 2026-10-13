@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_INSTALLER="$SCRIPT_DIR/installer/install.sh"
 
 if [[ -f "$LOCAL_INSTALLER" ]]; then
-  exec "$LOCAL_INSTALLER" standalone "$@"
+  exec bash "$LOCAL_INSTALLER" standalone "$@"
 fi
 
 command -v curl >/dev/null || { printf '[JTWZ] 缺少 curl，无法下载安装包。\n' >&2; exit 1; }
@@ -21,4 +21,4 @@ curl -fL --retry 3 --connect-timeout 10 "$SOURCE_URL" -o "$TMP_DIR/jtwz-source.t
 tar -xzf "$TMP_DIR/jtwz-source.tar.gz" -C "$TMP_DIR"
 DOWNLOADED_INSTALLER="$(find "$TMP_DIR" -path '*/deploy/installer/install.sh' -type f -print -quit)"
 [[ -n "$DOWNLOADED_INSTALLER" ]] || { printf '[JTWZ] 安装包结构不完整：缺少 installer/install.sh。\n' >&2; exit 1; }
-exec "$DOWNLOADED_INSTALLER" standalone "$@"
+bash "$DOWNLOADED_INSTALLER" standalone "$@"

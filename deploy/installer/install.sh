@@ -170,8 +170,13 @@ install_application() {
   install -d -m 755 "$TARGET_DIR"
   cp -a "$SOURCE_DIR"/. "$TARGET_DIR"/
   if [[ "$PANEL" != '1panel' ]]; then
-    if [[ -f "$TARGET_DIR/package-lock.json" ]]; then npm --prefix "$TARGET_DIR" ci --omit=dev; else npm --prefix "$TARGET_DIR" install --omit=dev; fi
-    [[ -f "$TARGET_DIR/dist-server/index.js" ]] || npm --prefix "$TARGET_DIR" run build
+    if [[ -f "$TARGET_DIR/dist-server/index.js" ]]; then
+      if [[ -f "$TARGET_DIR/package-lock.json" ]]; then npm --prefix "$TARGET_DIR" ci --omit=dev; else npm --prefix "$TARGET_DIR" install --omit=dev; fi
+    else
+      if [[ -f "$TARGET_DIR/package-lock.json" ]]; then npm --prefix "$TARGET_DIR" ci; else npm --prefix "$TARGET_DIR" install; fi
+      npm --prefix "$TARGET_DIR" run build
+      npm --prefix "$TARGET_DIR" prune --omit=dev
+    fi
   else
     [[ -f "$TARGET_DIR/dist-server/index.js" ]] || die '1Panel 包缺少已构建的 dist-server，请重新下载完整安装包。'
   fi
@@ -233,6 +238,7 @@ install_panel_runtime() {
 }
 
 main() {
+  local control_script=''
   say "JTWZ 安装向导（$PANEL）"
   if [[ -f "$ENV_FILE" && -s "$ENV_FILE" ]]; then load_existing_env; else prompt_settings; fi
   validate_public_address "$PUBLIC_DOMAIN"
@@ -240,8 +246,15 @@ main() {
   install_application
   install_panel_runtime
   if [[ -f "$PACKAGE_DIR/jtwzctl" ]]; then
-    install -m 755 "$PACKAGE_DIR/jtwzctl" /usr/local/bin/jtwzctl
+    control_script="$PACKAGE_DIR/jtwzctl"
+  elif [[ -f "$SCRIPT_DIR/jtwzctl" ]]; then
+    control_script="$SCRIPT_DIR/jtwzctl"
+  fi
+  if [[ -n "$control_script" ]]; then
+    install -m 755 "$control_script" /usr/local/bin/jtwzctl
     ln -sfn /usr/local/bin/jtwzctl /usr/local/bin/jt
+  else
+    die '安装包缺少 jtwzctl 管理脚本。'
   fi
   say '安装完成。'
   say "查看状态：jtwzctl status"
