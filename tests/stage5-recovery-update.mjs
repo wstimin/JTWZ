@@ -85,7 +85,7 @@ try {
     privateKeyB64: Buffer.from(privateKey.export({ type: 'pkcs8', format: 'pem' })).toString('base64') })
   let manifest = JSON.parse(readFileSync(updateManifest, 'utf8'))
   const signedManifest = { ...manifest }
-  globalThis.fetch = async (input) => String(input) === process.env.UPDATE_MANIFEST_URL
+  globalThis.fetch = async (input) => new URL(String(input)).pathname.endsWith('/update-manifest.json')
     ? new Response(JSON.stringify(manifest), { status: 200, headers: { 'Content-Type': 'application/json' } })
     : new Response(readFileSync(updateAsset), { status: 200, headers: { 'Content-Length': String(readFileSync(updateAsset).length) } })
   const update = await checkForUpdate()
