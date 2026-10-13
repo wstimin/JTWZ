@@ -30,7 +30,7 @@ export function RedirectsPage({ domains, rules, setRules }: { domains: DomainRec
   const [startsAt, setStartsAt] = useState('')
   const [expiresAt, setExpiresAt] = useState('')
   const [saving, setSaving] = useState(false)
-  const { notify } = useToast()
+  const { notify, confirm } = useToast()
   const { admin } = useAuth()
   const canManage = Boolean(admin?.permissions.includes('content.manage'))
 
@@ -108,7 +108,7 @@ export function RedirectsPage({ domains, rules, setRules }: { domains: DomainRec
   }
 
   async function removeRule(rule: RedirectRuleRecord) {
-    if (!window.confirm(`确定删除跳转规则“${rule.name || rule.sourcePath}”吗？此操作无法撤销。`)) return
+    if (!await confirm({ title: '删除跳转规则', message: `确定删除跳转规则“${rule.name || rule.sourcePath}”吗？此操作无法撤销。`, confirmLabel: '删除规则', tone: 'danger' })) return
     try {
       await apiJson(`/api/redirects/${encodeURIComponent(rule.id)}`, 'DELETE')
       setRules((current) => current.filter((entry) => entry.id !== rule.id))

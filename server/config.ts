@@ -32,6 +32,12 @@ const packageMetadata = JSON.parse(readFileSync(resolve(rootDir, 'package.json')
 const allowLocalStorageInProduction = ['1', 'true', 'yes'].includes(String(process.env.ALLOW_LOCAL_STORAGE_IN_PRODUCTION || '').toLowerCase())
 const reservedAdminPaths = new Set(['api', 'assets', 'admin-assets', 'downloads', 'preview', 'login'])
 
+function updatePublicKey() {
+  const encoded = String(process.env.UPDATE_PUBLIC_KEY_B64 || '').trim()
+  if (encoded) return Buffer.from(encoded, 'base64').toString('utf8').trim()
+  return String(process.env.UPDATE_PUBLIC_KEY || '').replace(/\\n/g, '\n').trim()
+}
+
 export function normalizeAdminBasePath(value: string | undefined) {
   const candidate = `/${String(value || '/admin').trim().replace(/^\/+|\/+$/g, '').toLowerCase()}`
   const segment = candidate.slice(1)
@@ -119,7 +125,7 @@ export const config = {
   certificateCallbackSecret: process.env.CERTIFICATE_CALLBACK_SECRET || configuredSecret || 'jtwz-development-secret-change-before-production',
   systemVersion: String(packageMetadata.version || '0.0.0'),
   updateManifestUrl: process.env.UPDATE_MANIFEST_URL || '',
-  updatePublicKey: (process.env.UPDATE_PUBLIC_KEY || '').replace(/\\n/g, '\n'),
+  updatePublicKey: updatePublicKey(),
   updateApplyCommand: process.env.UPDATE_APPLY_COMMAND || '',
   updateApplyArgsJson: process.env.UPDATE_APPLY_ARGS_JSON || '[]',
   isProduction,

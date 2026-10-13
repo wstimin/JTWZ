@@ -22,7 +22,7 @@ PUBLIC_BASE_URL=''
 ADMIN_BASE_URL=''
 ADMIN_BASE_PATH='/admin'
 EXISTING_INSTALL='false'
-UPDATE_PUBLIC_KEY_VALUE=''
+UPDATE_PUBLIC_KEY_B64_VALUE=''
 UPDATE_APPLY_COMMAND_VALUE='/usr/local/bin/jtwz-update'
 UPDATE_APPLY_ARGS_JSON_VALUE='[]'
 [[ -d "$SOURCE_DIR" ]] || SOURCE_DIR="$(cd -- "$PACKAGE_DIR/.." && pwd)"
@@ -32,8 +32,6 @@ if [[ "$PANEL" != '1panel' ]]; then
 else
   UPDATE_APPLY_COMMAND_VALUE=''
 fi
-if [[ -f "$SCRIPT_DIR/update-public-key.pem" ]]; then UPDATE_PUBLIC_KEY_VALUE="$(awk '{printf "%s\\n", $0}' "$SCRIPT_DIR/update-public-key.pem")"; fi
-
 say() { printf '\n[JTWZ] %s\n' "$*"; }
 die() { printf '\n[JTWZ][错误] %s\n' "$*" >&2; exit 1; }
 ask() { local prompt="$1" default="${2:-}" value; if [[ -n "$default" ]]; then read -r -p "$prompt [$default]: " value; printf '%s' "${value:-$default}"; else read -r -p "$prompt: " value; printf '%s' "$value"; fi; }
@@ -144,6 +142,7 @@ select_access_mode() {
 [[ "$(id -u)" == 0 ]] || die '请使用 root 执行安装。'
 command -v curl >/dev/null || die '缺少 curl，请先安装后重试。'
 command -v openssl >/dev/null || die '缺少 openssl，请先安装后重试。'
+if [[ -f "$SCRIPT_DIR/update-public-key.pem" ]]; then UPDATE_PUBLIC_KEY_B64_VALUE="$(openssl base64 -A -in "$SCRIPT_DIR/update-public-key.pem")"; fi
 
 install_node() {
   if ! command -v python3 >/dev/null; then
@@ -219,7 +218,7 @@ write_env() {
     upsert_env PUBLIC_APP_ORIGIN "$PUBLIC_BASE_URL"
     upsert_env ADMIN_APP_ORIGIN "$ADMIN_BASE_URL"
     upsert_env UPDATE_MANIFEST_URL 'https://github.com/wstimin/JTWZ/releases/latest/download/update-manifest.json'
-    [[ -z "$UPDATE_PUBLIC_KEY_VALUE" ]] || upsert_env UPDATE_PUBLIC_KEY "$UPDATE_PUBLIC_KEY_VALUE"
+    [[ -z "$UPDATE_PUBLIC_KEY_B64_VALUE" ]] || upsert_env UPDATE_PUBLIC_KEY_B64 "$UPDATE_PUBLIC_KEY_B64_VALUE"
     upsert_env UPDATE_APPLY_COMMAND "$UPDATE_APPLY_COMMAND_VALUE"
     upsert_env UPDATE_APPLY_ARGS_JSON "$UPDATE_APPLY_ARGS_JSON_VALUE"
     chmod 600 "$ENV_FILE"
@@ -250,7 +249,7 @@ BACKUP_INTERVAL_HOURS=24
 BACKUP_RETENTION_DAYS=30
 SUPPORT_EMAIL=$SUPPORT_EMAIL
 UPDATE_MANIFEST_URL=https://github.com/wstimin/JTWZ/releases/latest/download/update-manifest.json
-UPDATE_PUBLIC_KEY=$UPDATE_PUBLIC_KEY_VALUE
+UPDATE_PUBLIC_KEY_B64=$UPDATE_PUBLIC_KEY_B64_VALUE
 UPDATE_APPLY_COMMAND=$UPDATE_APPLY_COMMAND_VALUE
 UPDATE_APPLY_ARGS_JSON=$UPDATE_APPLY_ARGS_JSON_VALUE
 EOF

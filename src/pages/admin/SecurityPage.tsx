@@ -14,7 +14,7 @@ const roleLabels = { owner: '所有者', admin: '管理员', editor: '内容编�
 
 export function SecurityPage() {
   const { admin, refresh } = useAuth()
-  const { notify } = useToast()
+  const { notify, confirm } = useToast()
   const [overview, setOverview] = useState<Overview>({ admins: [], sessions: [], events: [], canManageAdmins: false })
   const [loading, setLoading] = useState(true)
   const [createOpen, setCreateOpen] = useState(false)
@@ -63,7 +63,7 @@ export function SecurityPage() {
   }
 
   async function removeAdministrator(item: AdminRecord) {
-    if (!window.confirm(`确定删除管理员“${item.displayName}”吗？其所有会话会立即失效。`)) return
+    if (!await confirm({ title: '删除管理员', message: `确定删除管理员“${item.displayName}”吗？其所有会话会立即失效。`, confirmLabel: '删除管理员', tone: 'danger' })) return
     try {
       await apiJson(`/api/security/admins/${encodeURIComponent(item.id)}`, 'DELETE')
       notify('管理员已删除')
@@ -95,7 +95,7 @@ export function SecurityPage() {
 
   async function disableTwoFactor(event: FormEvent) {
     event.preventDefault()
-    if (!window.confirm('确定关闭双重验证吗？其他设备会话会同时撤销。')) return
+    if (!await confirm({ title: '关闭双重验证', message: '确定关闭双重验证吗？其他设备会话会同时撤销。', confirmLabel: '关闭 2FA', tone: 'danger' })) return
     try {
       await apiJson('/api/security/2fa/disable', 'POST', { currentPassword: disablePassword, code: disableCode })
       setDisablePassword(''); setDisableCode('')
@@ -106,7 +106,7 @@ export function SecurityPage() {
   }
 
   async function revokeSession(item: SessionRecord) {
-    if (!window.confirm(`确定让“${item.deviceName}”退出登录吗？`)) return
+    if (!await confirm({ title: '撤销登录会话', message: `确定让“${item.deviceName}”退出登录吗？`, confirmLabel: '撤销会话', tone: 'warning' })) return
     try {
       await apiJson(`/api/security/sessions/${encodeURIComponent(item.id)}`, 'DELETE')
       notify('设备会话已撤销')
@@ -115,7 +115,7 @@ export function SecurityPage() {
   }
 
   async function revokeOthers() {
-    if (!window.confirm('确定撤销当前账号的所有其他设备会话吗？')) return
+    if (!await confirm({ title: '撤销其他会话', message: '确定撤销当前账号的所有其他设备会话吗？', confirmLabel: '全部撤销', tone: 'warning' })) return
     const result = await apiJson<{ revoked: number }>('/api/security/sessions/revoke-others', 'POST')
     notify(`已撤销 ${result.revoked} 个其他设备会话`)
     await load()

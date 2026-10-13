@@ -478,6 +478,22 @@ function buildSystemHealth() {
   return { overall: checks.some((check) => check.status === 'error') ? 'degraded' : 'ok', checkedAt: new Date().toISOString(), checks }
 }
 
+async function checkedSystemUpdate() {
+  try {
+    return await checkForUpdate()
+  } catch (error) {
+    throw new HttpError(502, error instanceof Error ? error.message : '版本检测失败，请检查更新源配置')
+  }
+}
+
+async function applySystemUpdate() {
+  try {
+    return await installUpdate()
+  } catch (error) {
+    throw new HttpError(502, error instanceof Error ? error.message : '系统更新失败，请检查更新源和执行器配置')
+  }
+}
+
 async function api(request: AuthenticatedRequest, response: ServerResponse, url: URL) {
   const method = request.method || 'GET'
   checkOrigin(request)
@@ -759,7 +775,7 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     return
   }
   if (method === 'GET' && url.pathname === '/api/admin/system/update') {
-    sendJson(response, 200, { update: await checkForUpdate() })
+    sendJson(response, 200, { update: await checkedSystemUpdate() })
     return
   }
   if (method === 'POST' && url.pathname === '/api/settings/logo') {
@@ -805,13 +821,13 @@ async function api(request: AuthenticatedRequest, response: ServerResponse, url:
     return
   }
   if (method === 'POST' && url.pathname === '/api/admin/system/update/check') {
-    const update = await checkForUpdate()
+    const update = await checkedSystemUpdate()
     audit(admin.id, 'update_check', 'system', '1', update.configured ? String('latestVersion' in update ? update.latestVersion : config.systemVersion) : '未配置更新源')
     sendJson(response, 200, { update })
     return
   }
   if (method === 'POST' && url.pathname === '/api/admin/system/update/install') {
-    const update = await installUpdate()
+    const update = await applySystemUpdate()
     audit(admin.id, 'update_install', 'system', '1', `${update.version} / ${update.applyStarted ? '执行器已启动' : '已暂存'}`)
     sendJson(response, 202, { update })
     return

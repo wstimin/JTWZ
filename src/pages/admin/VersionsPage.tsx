@@ -27,7 +27,7 @@ export function VersionsPage({ software }: { software: SoftwareRecord[] }) {
   const [draft, setDraft] = useState<VersionDraft>(emptyDraft)
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
-  const { notify } = useToast()
+  const { notify, confirm } = useToast()
   const { admin } = useAuth()
   const canManage = Boolean(admin?.permissions.includes('content.manage'))
 
@@ -99,7 +99,7 @@ export function VersionsPage({ software }: { software: SoftwareRecord[] }) {
   }
 
   async function removeVersion(item: SoftwareVersionRecord) {
-    if (!window.confirm(`确定删除 ${item.software} v${item.version} 吗？关联安装包存在时系统会阻止删除。`)) return
+    if (!await confirm({ title: '删除版本记录', message: `确定删除 ${item.software} v${item.version} 吗？关联安装包存在时系统会阻止删除。`, confirmLabel: '删除版本', tone: 'danger' })) return
     try {
       await apiJson(`/api/versions/${encodeURIComponent(item.id)}`, 'DELETE')
       setVersions((current) => current.filter((entry) => entry.id !== item.id))

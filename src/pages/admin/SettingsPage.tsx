@@ -33,7 +33,7 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
   const [systemUpdate, setSystemUpdate] = useState<SystemUpdateStatus | null>(null)
   const [updateLoading, setUpdateLoading] = useState(false)
   const [logoLoading, setLogoLoading] = useState(false)
-  const { notify } = useToast()
+  const { notify, confirm } = useToast()
   const sectionParam = searchParams.get('section')
   const normalizedSection = sectionParam === 'admin' ? 'security' : sectionParam
   const activeSection = (['brand', 'security', 'storage', 'notifications', 'maintenance'].includes(normalizedSection || '') ? normalizedSection : 'brand') as 'brand' | 'security' | 'storage' | 'notifications' | 'maintenance'
@@ -95,7 +95,7 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
-    if (!window.confirm('恢复完整备份会替换当前站点数据和发布内容。系统会先自动创建回滚备份，确定继续吗？')) return
+    if (!await confirm({ title: '恢复完整备份', message: '恢复完整备份会替换当前站点数据和发布内容。系统会先自动创建回滚备份，确定继续吗？', confirmLabel: '恢复备份', tone: 'danger' })) return
     setImporting(true)
     try {
       const response = await fetch(apiUrl('/api/admin/import'), { method: 'POST', credentials: 'include', headers: csrfHeaders({ 'Content-Type': 'application/octet-stream' }), body: file })
@@ -143,7 +143,7 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
   }
 
   async function installSystemUpdate() {
-    if (!systemUpdate?.updateAvailable || !window.confirm(`即将备份当前网站并更新到 ${systemUpdate.latestVersion}，确定继续吗？`)) return
+    if (!systemUpdate?.updateAvailable || !await confirm({ title: '安装系统更新', message: `即将备份当前网站并更新到 ${systemUpdate.latestVersion}，确定继续吗？`, confirmLabel: '备份并更新', tone: 'warning' })) return
     setUpdateLoading(true)
     try {
       const result = await apiJson<{ update: { message: string; applyStarted: boolean } }>('/api/admin/system/update/install', 'POST')
@@ -174,7 +174,7 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
 
   async function updateAdminAccess(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!window.confirm(`管理入口将修改为 ${adminBasePathDraft}，旧地址会立即失效。确定继续吗？`)) return
+    if (!await confirm({ title: '修改管理入口', message: `管理入口将修改为 ${adminBasePathDraft}，旧地址会立即失效。确定继续吗？`, confirmLabel: '确认修改', tone: 'warning' })) return
     setAccessSaving(true)
     try {
       const result = await apiJson<{ access: AdminAccess }>('/api/admin/access', 'PUT', { currentPassword: accessPassword, adminBasePath: adminBasePathDraft })
@@ -208,7 +208,7 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
   }
 
   async function removeLogo() {
-    if (!draft.logoUrl || !window.confirm('确定恢复为系统默认品牌图形吗？')) return
+    if (!draft.logoUrl || !await confirm({ title: '恢复默认品牌图形', message: '确定恢复为系统默认品牌图形吗？', confirmLabel: '恢复默认', tone: 'warning' })) return
     setLogoLoading(true)
     try {
       const result = await apiJson<{ settings: BrandSettings }>('/api/settings/logo', 'DELETE')
@@ -228,9 +228,9 @@ export function SettingsPage({ settings, setSettings, integrations }: { settings
     { label: 'HTTPS / 证书', value: integrations.certificate.provider, configured: integrations.certificate.configured, detail: integrations.certificate.configured ? '支持自动签发或委托' : '等待服务商配置' },
     { label: '告警通知', value: integrations.notifications.configured ? 'Webhook' : '未配置', configured: integrations.notifications.configured, detail: integrations.notifications.configured ? '支持签名通知' : '仅保留站内告警' },
   ]
-  function selectSection(section: typeof activeSection) {
+  async function selectSection(section: typeof activeSection) {
     if (section === activeSection) return
-    if (dirty && (activeSection === 'brand' || activeSection === 'security') && !window.confirm('当前设置尚未保存，仍要切换分类吗？')) return
+    if (dirty && (activeSection === 'brand' || activeSection === 'security') && !await confirm({ title: '放弃未保存更改', message: '当前设置尚未保存，仍要切换分类吗？', confirmLabel: '放弃并切换', tone: 'warning' })) return
     const next = new URLSearchParams(searchParams)
     next.set('section', section)
     setSearchParams(next, { replace: true })

@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
@@ -19,7 +18,7 @@ process.env.APP_SECRET = 'stage5-original-secret'
 process.env.ADMIN_BASE_PATH = '/admin'
 process.env.STORAGE_PROVIDER = 'local'
 process.env.UPDATE_MANIFEST_URL = 'https://updates.example.test/update-manifest.json'
-process.env.UPDATE_PUBLIC_KEY = publicPem
+process.env.UPDATE_PUBLIC_KEY_B64 = Buffer.from(publicPem, 'utf8').toString('base64')
 process.env.UPDATE_APPLY_COMMAND = resolve(root, 'missing-update-executor')
 writeFileSync(envPath, [
   'NODE_ENV=development', 'ADMIN_USERNAME=migration-admin', 'ADMIN_PASSWORD=stage5-password',
@@ -28,8 +27,8 @@ writeFileSync(envPath, [
 
 let openedDb
 try {
-  const [{ db }, backup, { checkForUpdate, installUpdate }] = await Promise.all([
-    import('../dist-server/db.js'), import('../dist-server/backup.js'), import('../dist-server/updateService.js'),
+  const [{ db }, backup, { checkForUpdate, installUpdate }, { createUpdateManifest }] = await Promise.all([
+    import('../dist-server/db.js'), import('../dist-server/backup.js'), import('../dist-server/updateService.js'), import('../scripts/create-update-manifest.mjs'),
   ])
   openedDb = db
   const timestamp = new Date().toISOString()
@@ -81,11 +80,9 @@ try {
   const updateAsset = resolve(root, 'jtwz-one-click-v9.9.9.tar.gz')
   const updateManifest = resolve(root, 'update-manifest.json')
   writeFileSync(updateAsset, 'signed update artifact', 'utf8')
-  const generated = spawnSync(process.execPath, [resolve(process.cwd(), 'scripts/create-update-manifest.mjs'), '9.9.9', updateAsset, updateManifest,
-    'https://updates.example.test/jtwz-one-click-v9.9.9.tar.gz', '2026-10-13T00:00:00.000Z', 'signed stage 5 test'], {
-    env: { ...process.env, JTWZ_UPDATE_PRIVATE_KEY_B64: Buffer.from(privateKey.export({ type: 'pkcs8', format: 'pem' })).toString('base64') }, encoding: 'utf8',
-  })
-  assert.equal(generated.status, 0, generated.stderr)
+  createUpdateManifest({ version: '9.9.9', assetPath: updateAsset, outputPath: updateManifest,
+    downloadUrl: 'https://updates.example.test/jtwz-one-click-v9.9.9.tar.gz', publishedAt: '2026-10-13T00:00:00.000Z', notes: 'signed stage 5 test',
+    privateKeyB64: Buffer.from(privateKey.export({ type: 'pkcs8', format: 'pem' })).toString('base64') })
   let manifest = JSON.parse(readFileSync(updateManifest, 'utf8'))
   const signedManifest = { ...manifest }
   globalThis.fetch = async (input) => String(input) === process.env.UPDATE_MANIFEST_URL

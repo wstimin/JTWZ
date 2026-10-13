@@ -38,7 +38,8 @@ const env = Object.fromEntries(fs.readFileSync(process.env.JTWZ_VERIFY_ENV, 'utf
 const manifest = state.manifest || {}
 const digest = crypto.createHash('sha256').update(fs.readFileSync(archive)).digest('hex')
 if (digest !== manifest.sha256 || digest !== state.artifact.sha256) throw new Error('更新包 SHA-256 与签名清单不一致')
-const publicKey = String(env.UPDATE_PUBLIC_KEY || '').replace(/\\n/g, '\n')
+const encodedPublicKey = String(env.UPDATE_PUBLIC_KEY_B64 || '').trim()
+const publicKey = encodedPublicKey ? Buffer.from(encodedPublicKey, 'base64').toString('utf8') : String(env.UPDATE_PUBLIC_KEY || '').replace(/\\n/g, '\n')
 const payload = [manifest.version, manifest.publishedAt || '', manifest.notes || '', manifest.downloadUrl, String(manifest.sha256 || '').toLowerCase()].join('\n')
 if (!publicKey || !crypto.verify(null, Buffer.from(payload), publicKey, Buffer.from(String(manifest.signature || ''), 'base64'))) throw new Error('更新包 Ed25519 签名复核失败')
 NODE

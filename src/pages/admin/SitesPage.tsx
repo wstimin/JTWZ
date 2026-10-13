@@ -23,7 +23,7 @@ export function SitesPage({ sites, setSites, domains }: { sites: SiteRecord[]; s
   const [versions, setVersions] = useState<SiteVersionRecord[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [siteFilter, setSiteFilter] = useState<'all' | SiteRecord['status']>('all')
-  const { notify } = useToast()
+  const { notify, confirm } = useToast()
   const { admin } = useAuth()
   const canManage = Boolean(admin?.permissions.includes('content.manage'))
   const filteredSites = siteFilter === 'all' ? sites : sites.filter((site) => site.status === siteFilter)
@@ -81,7 +81,7 @@ export function SitesPage({ sites, setSites, domains }: { sites: SiteRecord[]; s
       if (!siteId) {
         if (editingMetaId) {
           const boundDomains = domains.filter((domainItem) => domainItem.mode === 'site' && domainItem.target === editingMetaId)
-          if (status !== 'published' && boundDomains.length && !window.confirm(`此网站当前绑定 ${boundDomains.length} 个域名（${boundDomains.map((item) => item.hostname).join('、')}）。继续后这些入口将不再展示网站，确定吗？`)) return
+          if (status !== 'published' && boundDomains.length && !await confirm({ title: '变更网站状态', message: `此网站当前绑定 ${boundDomains.length} 个域名（${boundDomains.map((item) => item.hostname).join('、')}）。继续后这些入口将不再展示网站，确定吗？`, confirmLabel: '继续变更', tone: 'warning' })) return
           const updated = await apiJson<{ site: SiteRecord }>(`/api/sites/${encodeURIComponent(editingMetaId)}`, 'PUT', { name, category, status })
           setSites((current) => current.map((item) => item.id === editingMetaId ? updated.site : item))
           setOpen(false)
@@ -120,7 +120,7 @@ export function SitesPage({ sites, setSites, domains }: { sites: SiteRecord[]; s
   async function removeSite(site: SiteRecord) {
     const boundDomains = domains.filter((domainItem) => domainItem.mode === 'site' && domainItem.target === site.id)
     if (boundDomains.length) return notify(`请先在域名管理中解除绑定：${boundDomains.map((item) => item.hostname).join('、')}`, 'info')
-    if (!window.confirm(`确定删除“${site.name}”及其所有发布版本吗？文件和历史版本会一并清除，此操作无法撤销。`)) return
+    if (!await confirm({ title: '永久删除网站', message: `确定删除“${site.name}”及其所有发布版本吗？文件和历史版本会一并清除，此操作无法撤销。`, confirmLabel: '永久删除', tone: 'danger' })) return
     try {
       await apiJson(`/api/sites/${encodeURIComponent(site.id)}`, 'DELETE')
       setSites((current) => current.filter((item) => item.id !== site.id))
@@ -133,7 +133,7 @@ export function SitesPage({ sites, setSites, domains }: { sites: SiteRecord[]; s
   async function toggleSite(site: SiteRecord) {
     const nextStatus: SiteRecord['status'] = site.status === 'offline' ? (site.currentVersionId ? 'published' : 'draft') : 'offline'
     const boundDomains = domains.filter((domainItem) => domainItem.mode === 'site' && domainItem.target === site.id)
-    if (nextStatus === 'offline' && boundDomains.length && !window.confirm(`下线后 ${boundDomains.map((item) => item.hostname).join('、')} 将停止展示此网站。确定继续吗？`)) return
+    if (nextStatus === 'offline' && boundDomains.length && !await confirm({ title: '下线网站', message: `下线后 ${boundDomains.map((item) => item.hostname).join('、')} 将停止展示此网站。确定继续吗？`, confirmLabel: '确认下线', tone: 'warning' })) return
     try {
       const result = await apiJson<{ site: SiteRecord }>(`/api/sites/${encodeURIComponent(site.id)}`, 'PUT', { status: nextStatus })
       setSites((current) => current.map((item) => item.id === site.id ? result.site : item))
@@ -157,7 +157,7 @@ export function SitesPage({ sites, setSites, domains }: { sites: SiteRecord[]; s
   }
 
   async function rollback(version: SiteVersionRecord) {
-    if (!historySite || !window.confirm(`确定回滚到 ${new Date(version.createdAt).toLocaleString('zh-CN')} 的版本吗？`)) return
+    if (!historySite || !await confirm({ title: '回滚网站版本', message: `确定回滚到 ${new Date(version.createdAt).toLocaleString('zh-CN')} 的版本吗？`, confirmLabel: '确认回滚', tone: 'warning' })) return
     setHistoryLoading(true)
     try {
       const result = await apiJson<{ site: SiteRecord }>(`/api/sites/${encodeURIComponent(historySite.id)}/rollback`, 'POST', { versionId: version.id })

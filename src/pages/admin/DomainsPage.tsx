@@ -75,7 +75,7 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
   const [certificateExpiresAt, setCertificateExpiresAt] = useState('')
   const [certificateNote, setCertificateNote] = useState('')
   const [savingCertificate, setSavingCertificate] = useState(false)
-  const { notify } = useToast()
+  const { notify, confirm } = useToast()
   const { admin } = useAuth()
   const canManage = Boolean(admin?.permissions.includes('content.manage'))
   const publishedSites = sites.filter((site) => site.status === 'published')
@@ -151,7 +151,7 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
   }
 
   async function removeDomain(id: string) {
-    if (!window.confirm('确定删除这个域名及其路径跳转规则吗？')) return
+    if (!await confirm({ title: '删除域名', message: '确定删除这个域名及其路径跳转规则吗？', confirmLabel: '删除域名', tone: 'danger' })) return
     try {
       await apiJson(`/api/domains/${encodeURIComponent(id)}`, 'DELETE')
       setDomains((current) => current.filter((domain) => domain.id !== id))
@@ -297,7 +297,7 @@ export function DomainsPage({ domains, setDomains, sites }: DomainsPageProps) {
   }
 
   async function removeCertificate(item: CertificateRecord) {
-    if (!window.confirm(`确定删除 ${item.issuer || '当前'} 证书记录吗？Webhook 证书会同时通知服务商撤销。`)) return
+    if (!await confirm({ title: '删除 SSL 证书', message: `确定删除 ${item.issuer || '当前'} 证书记录吗？Webhook 证书会同时通知服务商撤销。`, confirmLabel: '删除证书', tone: 'danger' })) return
     try {
       const result = await apiJson<{ domain: DomainRecord }>(`/api/certificates/${encodeURIComponent(item.id)}`, 'DELETE')
       setCertificates((current) => current.filter((entry) => entry.id !== item.id))

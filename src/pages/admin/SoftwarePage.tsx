@@ -21,7 +21,7 @@ export function SoftwarePage({ software, setSoftware }: { software: SoftwareReco
   const [version, setVersion] = useState('1.0.0')
   const [status, setStatus] = useState<SoftwareRecord['status']>('draft')
   const [saving, setSaving] = useState(false)
-  const { notify } = useToast()
+  const { notify, confirm } = useToast()
   const { admin } = useAuth()
   const canManage = Boolean(admin?.permissions.includes('content.manage'))
   const filtered = useMemo(() => software.filter((item) => `${item.name} ${item.platform}`.toLowerCase().includes(query.toLowerCase())), [query, software])
@@ -88,7 +88,7 @@ export function SoftwarePage({ software, setSoftware }: { software: SoftwareReco
   }
 
   async function removeSoftware(item: SoftwareRecord) {
-    if (!window.confirm(`确定删除软件“${item.name}”吗？只有未关联安装包的软件才能彻底删除。`)) return
+    if (!await confirm({ title: '删除软件', message: `确定删除软件“${item.name}”吗？只有未关联安装包的软件才能彻底删除。`, confirmLabel: '删除软件', tone: 'danger' })) return
     try {
       await apiJson(`/api/software/${encodeURIComponent(item.id)}`, 'DELETE')
       setSoftware((current) => current.filter((entry) => entry.id !== item.id))

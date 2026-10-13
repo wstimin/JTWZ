@@ -42,7 +42,7 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
   const [activeUploadId, setActiveUploadId] = useState('')
   const [uploadProgress, setUploadProgress] = useState(0)
   const pauseRequested = useRef(false)
-  const { notify } = useToast()
+  const { notify, confirm } = useToast()
   const { admin } = useAuth()
   const canManage = Boolean(admin?.permissions.includes('content.manage'))
 
@@ -169,7 +169,7 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
   }
 
   async function removeSession(item: ResumableSession) {
-    if (!window.confirm(`确定清除 ${item.fileName} 的未完成上传分片吗？`)) return
+    if (!await confirm({ title: '清除上传任务', message: `确定清除 ${item.fileName} 的未完成上传分片吗？`, confirmLabel: '确认清除', tone: 'danger' })) return
     try {
       await apiJson(`/api/packages/resumable/${encodeURIComponent(item.id)}`, 'DELETE')
       setResumableSessions((current) => current.filter((entry) => entry.id !== item.id))
@@ -181,7 +181,7 @@ export function PackagesPage({ packages, setPackages, software, setSoftware, sto
   }
 
   async function removePackage(item: PackageRecord) {
-    if (!window.confirm(`确定删除安装包 ${item.fileName} 吗？`)) return
+    if (!await confirm({ title: '删除安装包', message: `确定删除安装包 ${item.fileName} 吗？`, confirmLabel: '删除安装包', tone: 'danger' })) return
     try {
       await apiJson(`/api/packages/${encodeURIComponent(item.id)}`, 'DELETE')
       setPackages((current) => current.filter((entry) => entry.id !== item.id))
